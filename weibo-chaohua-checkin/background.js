@@ -11,6 +11,7 @@
     'Accept': 'application/json, text/plain, */*',
     'MWeibo-Pwa': '1',
     'Referer': 'https://m.weibo.cn/p/tabbar?containerid=100803_-_recentvisit&page_type=tabbar',
+    'X-Requested-With': 'XMLHttpRequest',
     'User-Agent': typeof navigator !== 'undefined' ? navigator.userAgent : 'Mozilla/5.0',
   };
   const WEIBO_TAB_URL = 'https://m.weibo.cn/p/tabbar?containerid=100803_-_recentvisit';
@@ -71,34 +72,29 @@
     }
   }
 
-  async function getSupertopicList() {
-    const allCards = [];
-    let pageCount = 1;
-    let sinceId = undefined;
-    try {
-      while (true) {
-        const params = new URLSearchParams({ containerid: '100803_-_followsuper' });
-        if (sinceId) params.set('since_id', sinceId);
-        const url = `https://m.weibo.cn/api/container/getIndex?${params.toString()}`;
-        const resp = await fetch(url, { credentials: 'include', headers });
-        if (!resp.ok) break;
-        const data = await resp.json();
-        if (data.ok !== 1) break;
-        const cards = data?.data?.cards || [];
-        allCards.push(...cards);
-        const info = data?.data?.cardlistInfo || {};
-        sinceId = info.since_id;
-        if (!sinceId) break;
-        pageCount += 1;
-        await new Promise(r => setTimeout(r, 300));
+  async function fetchWithRetry(input, init = {}, opts = {}) {
+    const { retries = 3, timeoutMs = 15000, backoffMs = 300 } = opts;
+    let attempt = 0;
+    while (true) {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), timeoutMs);
+      try {
+        const resp = await fetch(input, { ...init, signal: ctrl.signal });
+        clearTimeout(t);
+        if (resp.ok) return resp;
+        if (![429, 500, 502, 503, 504].includes(resp.status)) return resp;
+        if (attempt >= retries) return resp;
+      } catch (e) {
+        clearTimeout(t);
+        if (attempt >= retries) throw e;
       }
-    } catch (e) {
-      return null;
+      attempt += 1;
+      await new Promise(r => setTimeout(r, backoffMs * attempt));
     }
-    if (allCards.length) {
-      return { ok: 1, data: { cards: allCards, cardlistInfo: { total_pages: pageCount, total_cards: allCards.length } } };
-    }
-    return null;
+  }
+
+  async function getSupertopicList() {
+    return await pageGetSupertopicList();
   }
 
   // 在页面上下文中执行代码，确保请求携带页面的 Cookie/Referer/Sec-Fetch 等头部
@@ -122,25 +118,73 @@
   async function pagePerformCheckin(scheme) {
     const tabId = await ensureWeiboTab();
     const result = await execInWeibo(tabId, async (s) => {
-      try {
-        const resp = await fetch(`https://m.weibo.cn${s}`, { credentials: 'include' });
-        const data = await resp.json();
-        if (data && data.ok === 1) {
-          return { ok: true };
+      let attempt = 0;
+      while (true) {
+        try {
+          const ctrl = new AbortController();
+          const t = setTimeout(() => ctrl.abort(), 15000);
+          const resp = await fetch(`https://m.weibo.cn${s}`, { credentials: 'include', signal: ctrl.signal });
+          clearTimeout(t);
+          const data = await resp.json();
+          if (data && data.ok === 1) return { ok: true };
+          if (![429, 500, 502, 503, 504].includes(resp.status) || attempt >= 3) return { ok: false, data };
+        } catch (e) {
+          if (attempt >= 3) return { ok: false, error: String(e) };
         }
-        return { ok: false, data };
-      } catch (e) {
-        return { ok: false, error: String(e) };
+        attempt += 1;
+        await new Promise(r => setTimeout(r, 300 * attempt));
       }
     }, [scheme]);
+    return result;
+  }
+
+  async function pageGetSupertopicList() {
+    const tabId = await ensureWeiboTab();
+    const result = await execInWeibo(tabId, async () => {
+      const allCards = [];
+      let pageCount = 1;
+      let sinceId = undefined;
+      try {
+        while (true) {
+          const params = new URLSearchParams({ containerid: '100803_-_followsuper' });
+          if (sinceId) params.set('since_id', sinceId);
+          const url = `https://m.weibo.cn/api/container/getIndex?${params.toString()}`;
+          const ctrl = new AbortController();
+          const t = setTimeout(() => ctrl.abort(), 15000);
+          const resp = await fetch(url, { credentials: 'include', signal: ctrl.signal });
+          clearTimeout(t);
+          if (!resp.ok) break;
+          const data = await resp.json();
+          if (data.ok !== 1) break;
+          const cards = data?.data?.cards || [];
+          allCards.push(...cards);
+          const info = data?.data?.cardlistInfo || {};
+          sinceId = info.since_id;
+          if (!sinceId) break;
+          pageCount += 1;
+          await new Promise(r => setTimeout(r, 300 + Math.floor(Math.random() * 300)));
+        }
+      } catch (e) {
+        return null;
+      }
+      if (allCards.length) {
+        return { ok: 1, data: { cards: allCards, cardlistInfo: { total_pages: pageCount, total_cards: allCards.length } } };
+      }
+      return null;
+    }, []);
     return result;
   }
 
   async function performCheckin(topicName, scheme) {
     try {
       if (!scheme || !scheme.startsWith('/api/container/button')) return false;
-      const result = await pagePerformCheckin(scheme);
-      return !!(result && result.ok);
+      let ok = false;
+      for (let i = 0; i < 3 && !ok; i++) {
+        const result = await pagePerformCheckin(scheme);
+        ok = !!(result && result.ok);
+        if (!ok) await new Promise(r => setTimeout(r, 300 + Math.floor(Math.random() * 300)));
+      }
+      return ok;
     } catch (e) {
       return false;
     }
@@ -233,18 +277,21 @@
           const s = await loadSettings();
           const nextRun = await getFromStorage('nextRun');
           sendResponse({ ok: true, settings: s, nextRun });
-        } else if (msg?.type === 'runCheckinNow') {
-          const ok = await autoCheckin();
-          sendResponse({ ok });
-        } else if (msg?.type === 'pagePerformCheckin') {
-          const { scheme } = msg;
-          const result = await pagePerformCheckin(scheme);
-          sendResponse(result || { ok: false });
-        } else if (msg?.type === 'getLastResult') {
-          const r = await getFromStorage('lastResult');
-          sendResponse({ ok: true, result: r });
-        } else {
-          sendResponse({ ok: false, error: 'unknown_message' });
+      } else if (msg?.type === 'runCheckinNow') {
+        const ok = await autoCheckin();
+        sendResponse({ ok });
+      } else if (msg?.type === 'pagePerformCheckin') {
+        const { scheme } = msg;
+        const result = await pagePerformCheckin(scheme);
+        sendResponse(result || { ok: false });
+      } else if (msg?.type === 'pageGetSupertopicList') {
+        const result = await pageGetSupertopicList();
+        sendResponse(result || { ok: false });
+      } else if (msg?.type === 'getLastResult') {
+        const r = await getFromStorage('lastResult');
+        sendResponse({ ok: true, result: r });
+      } else {
+        sendResponse({ ok: false, error: 'unknown_message' });
         }
       } catch (e) {
         sendResponse({ ok: false, error: e?.message || String(e) });

@@ -41,8 +41,30 @@
     'Accept': 'application/json, text/plain, */*',
     'MWeibo-Pwa': '1',
     'Referer': 'https://m.weibo.cn/p/tabbar?containerid=100803_-_recentvisit&page_type=tabbar',
+    'X-Requested-With': 'XMLHttpRequest',
     'User-Agent': navigator.userAgent,
   };
+
+  async function fetchWithRetry(input, init = {}, opts = {}) {
+    const { retries = 3, timeoutMs = 15000, backoffMs = 300 } = opts;
+    let attempt = 0;
+    while (true) {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), timeoutMs);
+      try {
+        const resp = await fetch(input, { ...init, signal: ctrl.signal });
+        clearTimeout(t);
+        if (resp.ok) return resp;
+        if (![429, 500, 502, 503, 504].includes(resp.status)) return resp;
+        if (attempt >= retries) return resp;
+      } catch (e) {
+        clearTimeout(t);
+        if (attempt >= retries) throw e;
+      }
+      attempt += 1;
+      await new Promise(r => setTimeout(r, backoffMs * attempt));
+    }
+  }
 
   function ts() {
     const d = new Date();
@@ -136,7 +158,7 @@
         return;
       }
 
-      const resp = await fetch('https://m.weibo.cn/api/config', {
+      const resp = await fetchWithRetry('https://m.weibo.cn/api/config', {
         credentials: 'include',
         headers,
       });
@@ -192,48 +214,24 @@
       };
     }
 
-    const allCards = [];
-    let pageCount = 1;
-    let sinceId = undefined;
-    try {
-      while (running || analyzing) {
-        const params = new URLSearchParams({ containerid: '100803_-_followsuper' });
-        if (sinceId) params.set('since_id', sinceId);
-
-        log(`正在获取第${pageCount}页超话数据...`);
-        const url = `https://m.weibo.cn/api/container/getIndex?${params.toString()}`;
-        const resp = await fetch(url, { credentials: 'include', headers });
-        if (!resp.ok) {
-          log(`获取第${pageCount}页失败，状态码：${resp.status}`);
-          break;
+    if (isExtension) {
+      try {
+        const res = await new Promise(resolve => {
+          chrome.runtime.sendMessage({ type: 'pageGetSupertopicList' }, r => resolve(r || {}));
+        });
+        if (res && res.ok) {
+          const totalPages = res?.data?.cardlistInfo?.total_pages || 0;
+          const totalCards = res?.data?.cardlistInfo?.total_cards || 0;
+          log(`总共获取了${totalPages}页数据，包含${totalCards}个卡片`);
+          return res;
         }
-        const data = await resp.json();
-        if (data.ok !== 1) {
-          log(`第${pageCount}页获取失败：${data.msg || '未知错误'}`);
-          break;
-        }
-        const cards = data?.data?.cards || [];
-        allCards.push(...cards);
-        log(`第${pageCount}页获取成功，包含${cards.length}个卡片`);
-        const info = data?.data?.cardlistInfo || {};
-        sinceId = info.since_id;
-        if (!sinceId) {
-          log('since_id为空，已到达最后一页');
-          break;
-        }
-        pageCount += 1;
-        await new Promise(r => setTimeout(r, 300));
+        log('没有获取到任何超话数据');
+        return null;
+      } catch (e) {
+        log(`获取超话列表失败：${e.message}`);
+        return null;
       }
-    } catch (e) {
-      log(`获取超话列表失败：${e.message}`);
-      return null;
     }
-
-    if (allCards.length) {
-      log(`总共获取了${pageCount}页数据，包含${allCards.length}个卡片`);
-      return { ok: 1, data: { cards: allCards, cardlistInfo: { total_pages: pageCount, total_cards: allCards.length } } };
-    }
-    log('没有获取到任何超话数据');
     return null;
   }
 
@@ -250,9 +248,8 @@
         });
         return !!res.ok;
       }
-      // 备用：直接发起请求（预览或非扩展环境）
       const fullUrl = `https://m.weibo.cn${scheme}`;
-      const resp = await fetch(fullUrl, { credentials: 'include' });
+      const resp = await fetchWithRetry(fullUrl, { credentials: 'include', headers });
       if (!resp.ok) return false;
       const result = await resp.json();
       return result?.ok === 1;
@@ -293,12 +290,12 @@
 
         for (const btn of item.buttons) {
           const name = btn?.name || '';
-          if (name === '签到') {
+          if (name === '签到' || (name.includes('签到') && !name.includes('已'))) {
             canCheckin = true;
             checkinScheme = btn?.scheme || '';
             buttonStatus = '可签到';
             break;
-          } else if (['已签', '已签到', '明日再来'].includes(name)) {
+          } else if (['已签', '已签到', '今日已签', '明日再来'].includes(name) || name.includes('已签')) {
             checkedInBefore += 1;
             buttonStatus = '已签到';
             log(`✓ ${topicName} - 今日已签到`);
@@ -318,7 +315,7 @@
             actionResult = '签到失败';
             log(`✗ ${topicName} - 签到失败`);
           }
-          await new Promise(r => setTimeout(r, 500));
+          await new Promise(r => setTimeout(r, 400 + Math.floor(Math.random() * 300)));
         } else if (buttonStatus === '已签到') {
           actionResult = '已签到';
         } else {
