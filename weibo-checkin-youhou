@@ -1,23 +1,189 @@
 // ==UserScript==
-// @name       微博超话自动签到
-// @description  用户登录后进入微博主页，获取超级话题并自动签到
+// @name         微博超话自动签到
+// @description  用户登录后进入微博主页，获取超级话题并自动签到，内置状态面板与已签/待签详情查看
 // @homepageURL  https://github.com/Deuscx/WB_SIGN_EXT
 // @supportURL   https://github.com/Deuscx/WB_SIGN_EXT/issues
-// @grant       none
-// @version     2.0.4
+// @grant        none
+// @version      2.1.0
 // @author       deus
 // @match        https://weibo.com/*
 // @match        https://www.weibo.com/*
-// @require     https://cdn.jsdelivr.net/npm/@violentmonkey/dom@1
-// @require     https://cdn.jsdelivr.net/npm/@violentmonkey/ui@0.4
-// @require    https://cdn.jsdelivr.net/npm/axios@0.21.0/dist/axios.min.js
-// @namespace https://deuscx.github.io/
-// @downloadURL https://update.greasyfork.org/scripts/390039/%E5%BE%AE%E5%8D%9A%E8%B6%85%E8%AF%9D%E8%87%AA%E5%8A%A8%E7%AD%BE%E5%88%B0.user.js
-// @updateURL https://update.greasyfork.org/scripts/390039/%E5%BE%AE%E5%8D%9A%E8%B6%85%E8%AF%9D%E8%87%AA%E5%8A%A8%E7%AD%BE%E5%88%B0.meta.js
+// @require      https://cdn.jsdelivr.net/npm/@violentmonkey/dom@1
+// @require      https://cdn.jsdelivr.net/npm/@violentmonkey/ui@0.4
+// @require      https://cdn.jsdelivr.net/npm/axios@0.21.0/dist/axios.min.js
+// @namespace    https://deuscx.github.io/
+// @downloadURL  https://update.greasyfork.org/scripts/390039/%E5%BE%AE%E5%8D%9A%E8%B6%85%E8%AF%9D%E8%87%AA%E5%8A%A8%E7%AD%BE%E5%88%B0.user.js
+// @updateURL    https://update.greasyfork.org/scripts/390039/%E5%BE%AE%E5%8D%9A%E8%B6%85%E8%AF%9D%E8%87%AA%E5%8A%A8%E7%AD%BE%E5%88%B0.meta.js
 // ==/UserScript==
 (function() {
     "use strict";
-    var e = ".configContainer{display:flex;flex-direction:column;position:fixed;--bg-opacity:1;background-color:#fff;background-color:rgba(255,255,255,var(--bg-opacity));z-index:10;border-radius:.25rem;border-width:1px;--border-opacity:1;border-color:#cbd5e0;border-color:rgba(203,213,224,var(--border-opacity));padding:.75rem .5rem;max-width:190px;bottom:80px;right:0;transform:translateX(100%);transition-duration:.5s;transition-timing-function:cubic-bezier(.22,1,.36,1);transition-property:transform}.configContainer .cItem{font-size:.875rem;display:flex;justify-content:space-between;cursor:pointer}.configContainer .cItem .des{--text-opacity:1;color:#718096;color:rgba(113,128,150,var(--text-opacity))}#TIMEOUT{-webkit-appearance:none;-moz-appearance:none;appearance:none;display:inline-block;width:60px}.configContainer .action{padding-top:.5rem;padding-bottom:.5rem;border-radius:.25rem;background-color:#fff;cursor:pointer;position:absolute;top:50%;left:0;transform:translate3d(-100%,-50%,0)}.configContainer .action:hover{color:#ccc}.active{transform:translateX(0)}";
+
+    const cssStyle = `
+    .configContainer {
+        display: flex;
+        flex-direction: column;
+        position: fixed;
+        background-color: #ffffff;
+        z-index: 999999 !important;
+        border-radius: 8px;
+        border: 1px solid #e2e8f0;
+        box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.2);
+        padding: 12px 14px;
+        width: 280px;
+        max-height: 520px;
+        bottom: 80px;
+        right: 0;
+        transform: translateX(100%);
+        transition: transform 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+    .configContainer.active {
+        transform: translateX(0);
+    }
+    .configContainer .action {
+        padding: 8px 12px;
+        border-radius: 20px 0 0 20px;
+        background: linear-gradient(135deg, #ff8200, #e65100);
+        color: #ffffff;
+        font-weight: 600;
+        font-size: 13px;
+        cursor: pointer;
+        position: absolute;
+        top: 40px;
+        left: 0;
+        transform: translate3d(-100%, 0, 0);
+        box-shadow: -3px 2px 8px rgba(255, 130, 0, 0.3);
+        user-select: none;
+        display: flex;
+        align-items: center;
+        gap: 4px;
+    }
+    .configContainer .action:hover {
+        opacity: 0.92;
+    }
+    .panelTitle {
+        font-size: 15px;
+        font-weight: 700;
+        color: #2d3748;
+        margin-bottom: 10px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        border-bottom: 1px solid #edf2f7;
+        padding-bottom: 6px;
+    }
+    .cItem {
+        font-size: 13px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        cursor: pointer;
+        margin-bottom: 8px;
+        color: #4a5568;
+    }
+    .cItem input[type="number"] {
+        width: 65px;
+        padding: 2px 4px;
+        border: 1px solid #cbd5e0;
+        border-radius: 4px;
+    }
+    .runBtn {
+        background-color: #ff8200;
+        color: white;
+        border: none;
+        padding: 6px 12px;
+        border-radius: 6px;
+        font-size: 13px;
+        font-weight: 600;
+        cursor: pointer;
+        width: 100%;
+        margin-top: 4px;
+        margin-bottom: 10px;
+        transition: background-color 0.2s;
+    }
+    .runBtn:hover {
+        background-color: #e07300;
+    }
+    .tabGroup {
+        display: flex;
+        gap: 4px;
+        margin-bottom: 8px;
+        border-bottom: 1px solid #edf2f7;
+    }
+    .tabBtn {
+        font-size: 12px;
+        padding: 4px 8px;
+        border: none;
+        background: none;
+        cursor: pointer;
+        color: #718096;
+        border-bottom: 2px solid transparent;
+    }
+    .tabBtn.active {
+        color: #ff8200;
+        border-bottom-color: #ff8200;
+        font-weight: 600;
+    }
+    .topicListContainer {
+        max-height: 220px;
+        overflow-y: auto;
+        border: 1px solid #edf2f7;
+        border-radius: 6px;
+        padding: 4px 8px;
+        background: #f7fafc;
+    }
+    .topicItem {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        font-size: 12px;
+        padding: 5px 0;
+        border-bottom: 1px dashed #e2e8f0;
+    }
+    .topicItem:last-child {
+        border-bottom: none;
+    }
+    .topicName {
+        color: #2d3748;
+        font-weight: 500;
+        max-width: 160px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .statusBadge {
+        font-size: 11px;
+        padding: 2px 6px;
+        border-radius: 10px;
+    }
+    .badge-success { background-color: #c6f6d5; color: #22543d; }
+    .badge-pending { background-color: #feebc8; color: #7b341e; }
+    .msgContainer {
+        position: fixed;
+        z-index: 999999 !important;
+        top: 4rem;
+        right: 40px;
+    }
+    @keyframes slide-in-right { 0% { transform: translateX(1000px); opacity: 0; } 100% { transform: translateX(0); opacity: 1; } }
+    @keyframes slide-out-right { 0% { transform: translateX(0); opacity: 1; } 100% { transform: translateX(1000px); opacity: 0; } }
+    .removing { animation: slide-out-right 0.5s cubic-bezier(0.55, 0.085, 0.68, 0.53) both; }
+    .toastItem {
+        border-radius: 0.375rem;
+        max-width: 20rem;
+        color: #fff;
+        padding: 0.8rem 1.2rem;
+        cursor: pointer;
+        margin-bottom: 0.5rem;
+        animation: slide-in-right 0.5s cubic-bezier(0.25, 0.46, 0.45, 0.94) both;
+        font-size: 13px;
+        box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1);
+    }
+    .toast-info { background-color: #3182ce; }
+    .toast-success { background-color: #38a169; }
+    .toast-error { background-color: #e53e3e; }
+    .toast-warning { background-color: #dd6b20; }
+    `;
+
     function formatDateStr(ts) {
         if (!ts) return "";
         const d = new Date(ts);
@@ -26,382 +192,389 @@
         const day = String(d.getDate()).padStart(2, "0");
         return `${y}-${m}-${day}`;
     }
-    const isNewDay = e => {
-        if (!e) return true;
-        return formatDateStr(e) !== formatDateStr(Date.now());
+
+    const isNewDay = ts => {
+        if (!ts) return true;
+        return formatDateStr(ts) !== formatDateStr(Date.now());
     };
-    const o = function() {
-        const set = function(e, t) {
-            localStorage.setItem(e, JSON.stringify(t));
-        };
-        const get = function(e) {
-            const t = localStorage.getItem(e);
-            try {
-                return JSON.parse(t);
-            } catch (e) {
-                return t;
-            }
-        };
-        const remove = function(e) {
-            localStorage.removeItem(e);
-        };
-        const has = function(e) {
-            return Reflect.has(localStorage, e);
-        };
-        return {
-            set: set,
-            get: get,
-            remove: remove,
-            has: has
-        };
-    }();
-    const r = (e => () => e++)(0);
-    const a = "WB";
-    const c = `${a}_SIGNED_ARR`;
-    const s = "WB_CONFIG";
-    const i = {
-        SUCCESS: "success",
-        ERROR: "error",
-        INFO: "info",
-        WARNING: "warning"
+
+    const storage = {
+        set: (k, v) => localStorage.setItem(k, JSON.stringify(v)),
+        get: (k) => {
+            const v = localStorage.getItem(k);
+            try { return JSON.parse(v); } catch (e) { return v; }
+        },
+        remove: (k) => localStorage.removeItem(k)
     };
-    let u = o.get(s);
-    function ConfigPanel() {
-        const handleAutoSign = e => {
-            const t = e.target.checked;
-            const n = Object.assign({}, u, {
-                AUTO_SIGN: t
-            });
-            u = n;
-            o.set(s, u);
-        };
-        const handleShowToast = e => {
-            const t = e.target.checked;
-            const n = Object.assign({}, u, {
-                SHOW_TOAST: t
-            });
-            u = n;
-            o.set(s, u);
-        };
-        const handleTimeout = e => {
-            const t = e.target.value;
-            const n = Object.assign({}, u, {
-                TIMEOUT: t
-            });
-            u = n;
-            o.set(s, u);
-        };
-        const toggleClassList = () => {
-            document.querySelector(".configContainer").classList.toggle("active");
-        };
-        return VM.createElement(VM.Fragment, null, VM.createElement("div", {
-            className: "configContainer"
-        }, VM.createElement("label", {
-            htmlFor: "AUTO_SIGN",
-            className: "cItem"
-        }, VM.createElement("span", {
-            className: "des"
-        }, "自动签到"), VM.createElement("input", {
-            id: "AUTO_SIGN",
-            type: "checkbox",
-            onInput: handleAutoSign,
-            checked: u.AUTO_SIGN
-        })), VM.createElement("label", {
-            htmlFor: "SHOW_TOAST",
-            className: "cItem"
-        }, VM.createElement("span", {
-            className: "des"
-        }, "是否展示气泡"), VM.createElement("input", {
-            id: "SHOW_TOAST",
-            type: "checkbox",
-            onInput: handleShowToast,
-            checked: u.SHOW_TOAST
-        })), VM.createElement("label", {
-            htmlFor: "TIMEOUT",
-            className: "cItem"
-        }, VM.createElement("span", {
-            className: "des"
-        }, "气泡展示时间"), VM.createElement("input", {
-            id: "TIMEOUT",
-            type: "number",
-            onInput: handleTimeout,
-            min: "0",
-            value: parseInt(u.TIMEOUT, 10),
-            placeholder: "单位为毫秒"
-        })), VM.createElement("div", {
-            className: "action",
-            onClick: toggleClassList
-        }, "收放")), VM.createElement("style", null, e));
-    }
-    var l = ".msgContainer{position:fixed;background-color:initial;top:4rem;right:40px}@keyframes slide-in-right{0%{transform:translateX(1000px);opacity:0}to{transform:translateX(0);opacity:1}}@keyframes slide-out-right{0%{transform:translateX(0);opacity:1}to{transform:translateX(1000px);opacity:0}}.removing{animation:slide-out-right .5s cubic-bezier(.55,.085,.68,.53) both}.toastItem{background-color:#fff;background-color:rgba(255,255,255,var(--bg-opacity));border-width:1px;--border-opacity:1;border-color:#cbd5e0;border-color:rgba(203,213,224,var(--border-opacity));border-radius:.375rem;max-width:20rem;--text-opacity:1;color:#fff;color:rgba(255,255,255,var(--text-opacity));z-index:10;padding:1rem 1.5rem;cursor:pointer;--bg-opacity:1;background-color:#3182ce;background-color:rgba(49,130,206,var(--bg-opacity));opacity:.8;margin-bottom:.5rem;animation:slide-in-right .5s cubic-bezier(.25,.46,.45,.94) both}.toast-info{--bg-opacity:1;background-color:#63b3ed;background-color:rgba(99,179,237,var(--bg-opacity))}.toast-default{--bg-opacity:1;background-color:#3182ce;background-color:rgba(49,130,206,var(--bg-opacity))}.toast-success{--bg-opacity:1;background-color:#48bb78;background-color:rgba(72,187,120,var(--bg-opacity))}.toast-error{background-color:#ff5252}.toast-warning{--bg-opacity:1;background-color:#f6e05e;background-color:rgba(246,224,94,var(--bg-opacity))}";
-    const m = 8;
-    let d = 0;
-    const innerToast = e => {
-        const {content: t, type: n, timeout: o} = e;
-        function remove() {
-            const t = document.querySelector(`[data-tid='${e.id}']`);
-            t.classList.add("removing");
-            requestAnimationFrame((() => {
-                t.parentNode.removeChild(t);
-                d--;
-            }));
-        }
-        o && setTimeout((() => {
-            remove();
-        }), o);
-        return VM.createElement(VM.Fragment, null, VM.createElement("div", {
-            "data-tid": e.id,
-            className: `toastItem toast-${n}`,
-            onClick: remove
-        }, t));
-    };
-    const ToastContainer = () => VM.createElement("div", {
-        className: "msgContainer"
-    }, VM.createElement("style", null, l));
-    const g = {
-        type: i.INFO,
-        timeout: 5e3
-    };
-    const toastFactory = () => {
-        const e = ToastContainer();
-        const t = document.body.appendChild(e);
-        const toast = (e, n) => {
-            if (!o.get(s).SHOW_TOAST) return;
-            const a = Object.assign({}, g, {
-                id: r()
-            }, n, {
-                content: e
-            });
-            if (d < m) {
-                d++;
-                t.appendChild(innerToast(a));
-            }
-        };
-        toast.success = (e, t) => toast(e, Object.assign({}, t, {
-            type: i.SUCCESS
-        }));
-        toast.error = (e, t) => toast(e, Object.assign({}, t, {
-            type: i.ERROR
-        }));
-        toast.info = (e, t) => toast(e, Object.assign({}, t, {
-            type: i.INFO
-        }));
-        toast.warn = (e, t) => toast(e, Object.assign({}, t, {
-            type: i.WARNING
-        }));
-        return toast;
-    };
-    const p = toastFactory();
-    const f = {
+
+    const idGen = (e => () => e++)(0);
+    const KEY_SIGNED_ARR = "WB_SIGNED_ARR";
+    const KEY_CONFIG = "WB_CONFIG";
+    const KEY_TOPICS_ALL = "WB_TOPICS_ALL";
+    const KEY_LAST_CHECK = "lastCheck";
+    const KEY_IS_CHECK = "isCheck";
+
+    const DEFAULT_CONFIG = {
         AUTO_SIGN: true,
         SHOW_TOAST: true,
-        TIMEOUT: 1e3
+        TIMEOUT: 2000
     };
-    const b = axios.create({
-        baseURL: "https://weibo.com/",
-        timeout: 1e3 * 5
-    });
-    b.defaults.headers.post["Content-Type"] = "application/x-www-form-urlencoded";
-    b.interceptors.request.use((e => e), (e => Promise.error(e)));
-    b.interceptors.response.use((e => e.status === 200 ? Promise.resolve(e) : Promise.reject(e)), (e => {
-        const {response: t} = e;
-        if (t) {
-            console.log("发送请求失败", t);
-            return Promise.reject(t);
-        }
-        if (!window.navigator.onLine) console.error("断网"); else return Promise.reject(e);
-    }));
-    class BaseFeature {
-        constructor({name: e}) {
-            this.launch = () => {};
-            this.name = e;
-        }
-        get store() {
-            const e = o.get(this.name);
-            if (e) return e;
-            o.set(this.name, void 0);
-            return;
-        }
-        set store(e) {
-            o.set(this.name, e);
-        }
-        init() {
-            return new Promise(((e, t) => {
-                try {
-                    this.launch();
-                    e(this);
-                } catch (e) {
-                    console.log(`run ${this.name} error`);
-                    t(e);
-                }
-            }));
-        }
-    }
-    function isCheck() {
-        return o.get("isCheck") || false;
-    }
-    const h = o.get("lastCheck");
-    const signInterestAPI = e => b({
-        url: "p/aj/general/button",
-        params: {
-            ajwvr: 6,
-            api: "http://i.huati.weibo.com/aj/super/checkin",
-            texta: encodeURI("签到"),
-            textb: encodeURI("已签到"),
-            status: 0,
-            id: e,
-            __rnd: (new Date).getTime()
-        }
-    });
-    let y = o.get(c) || [];
-    const signInterest = ({id: e, name: t}) => new Promise(((r, a) => {
-        signInterestAPI(e).then((e => {
-            const {data: s} = e;
-            if (s.code === "100000") {
-                window.toast.success(`[${t}签到成功]${s.msg} ---${s.data.alert_title}`);
-                o.set("lastCheck", n());
-                y.push(t);
-                y = Array.from(new Set(y));
-                o.set(c, y);
-            } else {
-                window.toast.warn(`[${t}超话签到]${s.msg}`);
-                if (s.code !== 382004) a("error"); else {
-                    o.set("lastCheck", n());
-                    y.push(t);
-                    y = Array.from(new Set(y));
-                    o.set(c, y);
-                }
-            }
-            r();
-        }), (e => {
-            a(e);
-            window.toast.error(`[${t}超话签到]签到失败，请检查网络`);
-        }));
-    }));
-    function delay(e) {
-        return new Promise((t => setTimeout(t, e)));
-    }
-    function getInterestNameAId(e = 1) {
-        return new Promise(((t, n) => {
-            b({
-                url: `ajax/profile/topicContent?tabid=231093_-_chaohua&page=${e}`
-            }).then((o => {
-                const {data: {data: r, ok: a}} = o;
-                if (a !== 1) n({
-                    err: "获取关注超话失败",
-                    data: r
+
+    let config = storage.get(KEY_CONFIG) || DEFAULT_CONFIG;
+
+    // Toast Notification Manager
+    let activeToastCount = 0;
+    const MAX_TOASTS = 8;
+    const createToastItem = e => {
+        const { content, type, timeout, id } = e;
+        function remove() {
+            const el = document.querySelector(`[data-tid='${id}']`);
+            if (el) {
+                el.classList.add("removing");
+                requestAnimationFrame(() => {
+                    if (el.parentNode) el.parentNode.removeChild(el);
+                    activeToastCount--;
                 });
-                const c = r.list;
-                const s = r.max_page;
-                function extractId(e) {
-                    return e.slice(5);
-                }
-                const i = c.map((({oid: e, topic_name: t}) => ({
-                    id: extractId(e),
-                    name: t
-                })));
-                if (e < s) getInterestNameAId(e + 1).then((e => {
-                    t(i.concat(e));
-                })); else t(i);
-            }), (e => {
-                console.error(`[${a}]`, e);
-                n("获取hash失败");
-            }));
-        }));
+            }
+        }
+        if (timeout) setTimeout(remove, timeout);
+        return VM.createElement("div", {
+            "data-tid": id,
+            className: `toastItem toast-${type}`,
+            onClick: remove
+        }, content);
+    };
+
+    const toastFactory = () => {
+        const container = VM.createElement("div", { className: "msgContainer" }, VM.createElement("style", null, cssStyle));
+        let mountedEl = null;
+
+        const ensureMount = () => {
+            if (!mountedEl && document.body) {
+                mountedEl = document.body.appendChild(container);
+            }
+            return mountedEl;
+        };
+
+        const show = (content, opts = {}) => {
+            if (!storage.get(KEY_CONFIG)?.SHOW_TOAST) return;
+            const parent = ensureMount();
+            if (!parent) return;
+            const itemOpts = Object.assign({ id: idGen(), type: "info", timeout: 4000, content }, opts);
+            if (activeToastCount < MAX_TOASTS) {
+                activeToastCount++;
+                parent.appendChild(createToastItem(itemOpts));
+            }
+        };
+
+        return {
+            success: (msg, opts) => show(msg, { ...opts, type: "success" }),
+            error: (msg, opts) => show(msg, { ...opts, type: "error" }),
+            info: (msg, opts) => show(msg, { ...opts, type: "info" }),
+            warn: (msg, opts) => show(msg, { ...opts, type: "warning" })
+        };
+    };
+
+    const toast = toastFactory();
+    window.toast = toast;
+
+    const axiosInstance = axios.create({
+        baseURL: `${location.origin}/`,
+        withCredentials: true,
+        timeout: 10000
+    });
+    axiosInstance.defaults.headers.post["Content-Type"] = "application/x-www-form-urlencoded";
+
+    function delay(ms) {
+        return new Promise(resolve => setTimeout(resolve, ms));
     }
+
     class PromiseQueue {
-        constructor({concurrency: e = 1, timeout: t = 0} = {}) {
+        constructor({ concurrency = 1, timeout = 500 } = {}) {
             this.queue = [];
             this.running = 0;
-            this.concurrency = e;
-            this.timeout = t;
+            this.concurrency = concurrency;
+            this.timeout = timeout;
         }
-        add(e) {
-            return new Promise(((t, n) => {
-                const wrappedFn = async () => {
+        add(fn) {
+            return new Promise((resolve, reject) => {
+                const task = async () => {
                     try {
-                        const n = e();
+                        const res = await fn();
                         await delay(this.timeout);
-                        const o = await n;
-                        t(o);
-                    } catch (e) {
-                        n(e);
+                        resolve(res);
+                    } catch (err) {
+                        reject(err);
                     } finally {
                         this.running--;
                         this.processQueue();
                     }
                 };
-                this.queue.push(wrappedFn);
+                this.queue.push(task);
                 this.processQueue();
-            }));
+            });
         }
         processQueue() {
             while (this.running < this.concurrency && this.queue.length > 0) {
                 this.running++;
-                const e = this.queue.shift();
-                e();
+                const task = this.queue.shift();
+                task();
             }
         }
     }
-    class Interest extends BaseFeature {
-        constructor() {
-            super({
-                name: s
-            });
-            this.launch = async () => {
-                const e = super.store;
-                if (!e.AUTO_SIGN) return;
-                if (isCheck() && !isNewDay(h)) {
-                    window.toast.info("今日已签到");
+
+    function getInterestNameAId(page = 1) {
+        return new Promise((resolve, reject) => {
+            axiosInstance({
+                url: `ajax/profile/topicContent?tabid=231093_-_chaohua&page=${page}`
+            }).then(resp => {
+                const { data: { data, ok } } = resp;
+                if (ok !== 1 || !data) {
+                    reject({ err: "获取关注超话失败", data });
                     return;
                 }
-                if (isNewDay(h)) {
-                    o.remove(c);
-                    o.set("isCheck", false);
+                const list = data.list || [];
+                const maxPage = data.max_page || 1;
+                const topics = list.map(item => ({
+                    id: item.oid ? item.oid.slice(5) : "",
+                    name: item.topic_name || ""
+                }));
+                if (page < maxPage) {
+                    getInterestNameAId(page + 1).then(nextList => resolve(topics.concat(nextList))).catch(() => resolve(topics));
+                } else {
+                    resolve(topics);
                 }
-                let t = await getInterestNameAId();
-                const n = o.get(c);
-                if (n && n.length) t = t.filter((e => !n.includes(e.name)));
-                const r = new PromiseQueue({
-                    concurrency: 1,
-                    timeout: 500
-                });
-                for (const {name: e, id: n} of t) await r.add((() => signInterest({
-                    id: n,
-                    name: e
-                })));
-                o.set("isCheck", true);
-            };
-        }
-        run() {
-            this.init().then((e => {}));
-        }
+            }).catch(err => reject(err));
+        });
     }
-    var w = new Interest;
-    function initConfig() {
-        if (!o.get(s)) o.set(s, f);
-    }
-    function initDOM() {
-        return new Promise(((e, t) => {
-            try {
-                const e = ConfigPanel();
-                document.body.appendChild(e);
-            } catch (e) {
-                throw new Error("初始化DOM失败");
+
+    function signInterestAPI(topicId) {
+        return axiosInstance({
+            url: "p/aj/general/button",
+            params: {
+                ajwvr: 6,
+                api: "http://i.huati.weibo.com/aj/super/checkin",
+                texta: encodeURI("签到"),
+                textb: encodeURI("已签到"),
+                status: 0,
+                id: topicId,
+                __rnd: Date.now()
             }
-        }));
+        });
     }
-    function BaseInit() {
-        initConfig();
-        window.toast = p;
+
+    function signInterest({ id, name }) {
+        let signedArr = storage.get(KEY_SIGNED_ARR) || [];
+        return new Promise((resolve, reject) => {
+            signInterestAPI(id).then(resp => {
+                const { data } = resp;
+                if (data.code === "100000") {
+                    toast.success(`[${name}] 签到成功！`);
+                    storage.set(KEY_LAST_CHECK, Date.now());
+                    if (!signedArr.includes(name)) {
+                        signedArr.push(name);
+                        storage.set(KEY_SIGNED_ARR, signedArr);
+                    }
+                    resolve({ ok: true, name });
+                } else {
+                    toast.warn(`[${name}] ${data.msg || "无法签到"}`);
+                    if (data.code === 382004 || data.msg?.includes("已签")) {
+                        storage.set(KEY_LAST_CHECK, Date.now());
+                        if (!signedArr.includes(name)) {
+                            signedArr.push(name);
+                            storage.set(KEY_SIGNED_ARR, signedArr);
+                        }
+                        resolve({ ok: true, name });
+                    } else {
+                        reject(data.msg);
+                    }
+                }
+            }).catch(err => {
+                toast.error(`[${name}] 签到网络请求失败`);
+                reject(err);
+            });
+        });
     }
-    function OtherInit() {
-        initDOM();
+
+    // Config & UI Panel
+    function ConfigPanel() {
+        let activeTab = "all"; // 'all' | 'signed' | 'pending'
+
+        const updateState = (updater) => {
+            config = Object.assign({}, config, updater);
+            storage.set(KEY_CONFIG, config);
+        };
+
+        const togglePanel = () => {
+            const container = document.querySelector(".configContainer");
+            if (container) container.classList.toggle("active");
+            renderList();
+        };
+
+        const renderList = () => {
+            const listEl = document.getElementById("wbTopicListContainer");
+            if (!listEl) return;
+            listEl.innerHTML = "";
+
+            const allTopics = storage.get(KEY_TOPICS_ALL) || [];
+            const signedArr = storage.get(KEY_SIGNED_ARR) || [];
+
+            let filtered = allTopics;
+            if (activeTab === "signed") {
+                filtered = allTopics.filter(t => signedArr.includes(t.name));
+            } else if (activeTab === "pending") {
+                filtered = allTopics.filter(t => !signedArr.includes(t.name));
+            }
+
+            if (filtered.length === 0) {
+                listEl.appendChild(VM.createElement("div", { style: "font-size:12px;color:#a0aec0;text-align:center;padding:10px 0;" }, "暂无相关超话数据"));
+                return;
+            }
+
+            filtered.forEach(t => {
+                const isSigned = signedArr.includes(t.name);
+                const itemEl = VM.createElement("div", { className: "topicItem" },
+                    VM.createElement("span", { className: "topicName", title: t.name }, t.name),
+                    VM.createElement("span", { className: `statusBadge ${isSigned ? 'badge-success' : 'badge-pending'}` }, isSigned ? "已签到" : "待签到")
+                );
+                listEl.appendChild(itemEl);
+            });
+
+            // 更新选项卡标签文本
+            const tabAll = document.getElementById("tabAllBtn");
+            const tabSigned = document.getElementById("tabSignedBtn");
+            const tabPending = document.getElementById("tabPendingBtn");
+            if (tabAll) tabAll.textContent = `全部 (${allTopics.length})`;
+            if (tabSigned) tabSigned.textContent = `已签 (${signedArr.length})`;
+            if (tabPending) tabPending.textContent = `待签 (${Math.max(0, allTopics.length - signedArr.length)})`;
+        };
+
+        const switchTab = (tab) => {
+            activeTab = tab;
+            document.querySelectorAll(".tabBtn").forEach(b => b.classList.remove("active"));
+            const currentTabBtn = document.getElementById(`tab${tab.charAt(0).toUpperCase() + tab.slice(1)}Btn`);
+            if (currentTabBtn) currentTabBtn.classList.add("active");
+            renderList();
+        };
+
+        const triggerManualRun = () => {
+            toast.info("正在刷新并触发超话签到...");
+            runCheckin(true);
+        };
+
+        return VM.createElement(VM.Fragment, null,
+            VM.createElement("div", { className: "configContainer" },
+                VM.createElement("div", { className: "panelTitle" },
+                    VM.createElement("span", null, "微博超话自动签到"),
+                ),
+                VM.createElement("label", { className: "cItem" },
+                    VM.createElement("span", null, "自动签到"),
+                    VM.createElement("input", {
+                        type: "checkbox",
+                        checked: config.AUTO_SIGN,
+                        onInput: e => updateState({ AUTO_SIGN: e.target.checked })
+                    })
+                ),
+                VM.createElement("label", { className: "cItem" },
+                    VM.createElement("span", null, "显示气泡提示"),
+                    VM.createElement("input", {
+                        type: "checkbox",
+                        checked: config.SHOW_TOAST,
+                        onInput: e => updateState({ SHOW_TOAST: e.target.checked })
+                    })
+                ),
+                VM.createElement("label", { className: "cItem" },
+                    VM.createElement("span", null, "气泡延迟 (ms)"),
+                    VM.createElement("input", {
+                        type: "number",
+                        value: config.TIMEOUT,
+                        min: "0",
+                        onInput: e => updateState({ TIMEOUT: parseInt(e.target.value, 10) || 2000 })
+                    })
+                ),
+                VM.createElement("button", { className: "runBtn", onClick: triggerManualRun }, "一键开始签到"),
+                VM.createElement("div", { className: "tabGroup" },
+                    VM.createElement("button", { id: "tabAllBtn", className: "tabBtn active", onClick: () => switchTab("all") }, "全部"),
+                    VM.createElement("button", { id: "tabSignedBtn", className: "tabBtn", onClick: () => switchTab("signed") }, "已签"),
+                    VM.createElement("button", { id: "tabPendingBtn", className: "tabBtn", onClick: () => switchTab("pending") }, "待签")
+                ),
+                VM.createElement("div", { id: "wbTopicListContainer", className: "topicListContainer" }),
+                VM.createElement("div", { className: "action", onClick: togglePanel }, "📋 超话签到")
+            ),
+            VM.createElement("style", null, cssStyle)
+        );
     }
+
+    async function runCheckin(force = false) {
+        const lastCheck = storage.get(KEY_LAST_CHECK);
+        if (!force && storage.get(KEY_IS_CHECK) && !isNewDay(lastCheck)) {
+            toast.info("今日已完成签到");
+            return;
+        }
+
+        if (isNewDay(lastCheck)) {
+            storage.remove(KEY_SIGNED_ARR);
+            storage.set(KEY_IS_CHECK, false);
+        }
+
+        try {
+            const allTopics = await getInterestNameAId();
+            storage.set(KEY_TOPICS_ALL, allTopics);
+
+            const signedArr = storage.get(KEY_SIGNED_ARR) || [];
+            const pendingTopics = allTopics.filter(t => !signedArr.includes(t.name));
+
+            if (pendingTopics.length === 0) {
+                toast.info("所有超话今日均已签到完成！");
+                storage.set(KEY_IS_CHECK, true);
+                return;
+            }
+
+            toast.info(`发现 ${allTopics.length} 个超话，正在为你签到 ${pendingTopics.length} 个待签项目...`);
+
+            const queue = new PromiseQueue({ concurrency: 1, timeout: 600 });
+            for (const item of pendingTopics) {
+                await queue.add(() => signInterest(item).catch(() => {}));
+            }
+
+            storage.set(KEY_IS_CHECK, true);
+            toast.success("超话自动签到任务处理完毕！");
+
+            // 刷现UI中的列表状态
+            const container = document.querySelector(".configContainer");
+            if (container && container.classList.contains("active")) {
+                const tabAll = document.getElementById("tabAllBtn");
+                if (tabAll) tabAll.click();
+            }
+        } catch (err) {
+            toast.error("获取关注超话列表失败，请确认是否登录微博");
+        }
+    }
+
+    function initDOM() {
+        const mount = () => {
+            if (document.body && !document.querySelector(".configContainer")) {
+                const panel = ConfigPanel();
+                document.body.appendChild(panel);
+            }
+        };
+
+        if (document.body) {
+            mount();
+        } else {
+            document.addEventListener("DOMContentLoaded", mount);
+        }
+    }
+
     function main() {
-        BaseInit();
-        OtherInit();
-        w.run();
+        if (!storage.get(KEY_CONFIG)) {
+            storage.set(KEY_CONFIG, DEFAULT_CONFIG);
+        }
+        initDOM();
+        if (config.AUTO_SIGN) {
+            setTimeout(() => runCheckin(false), 2000);
+        }
     }
+
     main();
 })();
