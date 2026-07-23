@@ -467,4 +467,5 @@
   setLoginStatus('未登录', 'status-bad');
   updateStats();
   loadSettingsUI();
+  checkLogin();
 })();
