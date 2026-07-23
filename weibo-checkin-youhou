@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         微博超话自动签到
-// @description  用户登录后进入微博主页，获取超级话题并自动签到，内置状态面板与已签/待签详情查看
+// @description  用户登录后进入微博主页，获取超级话题并自动签到，内置状态面板与已签/待签详情查看（支持实时刷新）
 // @homepageURL  https://github.com/Deuscx/WB_SIGN_EXT
 // @supportURL   https://github.com/Deuscx/WB_SIGN_EXT/issues
 // @grant        none
-// @version      2.1.0
+// @version      2.2.0
 // @author       deus
 // @match        https://weibo.com/*
 // @match        https://www.weibo.com/*
@@ -72,6 +72,16 @@
         border-bottom: 1px solid #edf2f7;
         padding-bottom: 6px;
     }
+    .refreshBtn {
+        cursor: pointer;
+        font-size: 14px;
+        padding: 2px 4px;
+        border-radius: 4px;
+        transition: transform 0.2s;
+    }
+    .refreshBtn:hover {
+        transform: rotate(180deg);
+    }
     .cItem {
         font-size: 13px;
         display: flex;
@@ -87,22 +97,12 @@
         border: 1px solid #cbd5e0;
         border-radius: 4px;
     }
-    .runBtn {
-        background-color: #ff8200;
-        color: white;
-        border: none;
-        padding: 6px 12px;
-        border-radius: 6px;
-        font-size: 13px;
-        font-weight: 600;
-        cursor: pointer;
-        width: 100%;
-        margin-top: 4px;
-        margin-bottom: 10px;
-        transition: background-color 0.2s;
-    }
-    .runBtn:hover {
-        background-color: #e07300;
+    .statusText {
+        font-size: 12px;
+        color: #ff8200;
+        font-weight: 500;
+        margin-bottom: 6px;
+        min-height: 18px;
     }
     .tabGroup {
         display: flex;
@@ -125,7 +125,7 @@
         font-weight: 600;
     }
     .topicListContainer {
-        max-height: 220px;
+        max-height: 240px;
         overflow-y: auto;
         border: 1px solid #edf2f7;
         border-radius: 6px;
@@ -363,11 +363,16 @@
         });
     }
 
+    function cleanToastMsg(msg) {
+        if (!msg) return "已签到";
+        return msg.replace(/\(\d+\)/g, "").trim();
+    }
+
     function signInterest({ id, name }) {
-        let signedArr = storage.get(KEY_SIGNED_ARR) || [];
         return new Promise((resolve, reject) => {
             signInterestAPI(id).then(resp => {
                 const { data } = resp;
+                const signedArr = storage.get(KEY_SIGNED_ARR) || [];
                 if (data.code === "100000") {
                     toast.success(`[${name}] 签到成功！`);
                     storage.set(KEY_LAST_CHECK, Date.now());
@@ -375,15 +380,18 @@
                         signedArr.push(name);
                         storage.set(KEY_SIGNED_ARR, signedArr);
                     }
+                    if (window.renderWBTopicList) window.renderWBTopicList();
                     resolve({ ok: true, name });
                 } else {
-                    toast.warn(`[${name}] ${data.msg || "无法签到"}`);
+                    const displayMsg = cleanToastMsg(data.msg);
+                    toast.warn(`[${name}] ${displayMsg}`);
                     if (data.code === 382004 || data.msg?.includes("已签")) {
                         storage.set(KEY_LAST_CHECK, Date.now());
                         if (!signedArr.includes(name)) {
                             signedArr.push(name);
                             storage.set(KEY_SIGNED_ARR, signedArr);
                         }
+                        if (window.renderWBTopicList) window.renderWBTopicList();
                         resolve({ ok: true, name });
                     } else {
                         reject(data.msg);
@@ -397,9 +405,48 @@
     }
 
     // Config & UI Panel
-    function ConfigPanel() {
-        let activeTab = "all"; // 'all' | 'signed' | 'pending'
+    let activeTab = "all"; // 'all' | 'signed' | 'pending'
 
+    function renderList() {
+        const listEl = document.getElementById("wbTopicListContainer");
+        if (!listEl) return;
+        listEl.innerHTML = "";
+
+        const allTopics = storage.get(KEY_TOPICS_ALL) || [];
+        const signedArr = storage.get(KEY_SIGNED_ARR) || [];
+
+        let filtered = allTopics;
+        if (activeTab === "signed") {
+            filtered = allTopics.filter(t => signedArr.includes(t.name));
+        } else if (activeTab === "pending") {
+            filtered = allTopics.filter(t => !signedArr.includes(t.name));
+        }
+
+        if (filtered.length === 0) {
+            listEl.appendChild(VM.createElement("div", { style: "font-size:12px;color:#a0aec0;text-align:center;padding:10px 0;" }, "暂无相关超话数据"));
+        } else {
+            filtered.forEach(t => {
+                const isSigned = signedArr.includes(t.name);
+                const itemEl = VM.createElement("div", { className: "topicItem" },
+                    VM.createElement("span", { className: "topicName", title: t.name }, t.name),
+                    VM.createElement("span", { className: `statusBadge ${isSigned ? 'badge-success' : 'badge-pending'}` }, isSigned ? "已签到" : "待签到")
+                );
+                listEl.appendChild(itemEl);
+            });
+        }
+
+        // 更新选项卡标签文本与数字
+        const tabAll = document.getElementById("tabAllBtn");
+        const tabSigned = document.getElementById("tabSignedBtn");
+        const tabPending = document.getElementById("tabPendingBtn");
+        if (tabAll) tabAll.textContent = `全部 (${allTopics.length})`;
+        if (tabSigned) tabSigned.textContent = `已签 (${signedArr.length})`;
+        if (tabPending) tabPending.textContent = `待签 (${Math.max(0, allTopics.length - signedArr.length)})`;
+    }
+
+    window.renderWBTopicList = renderList;
+
+    function ConfigPanel() {
         const updateState = (updater) => {
             config = Object.assign({}, config, updater);
             storage.set(KEY_CONFIG, config);
@@ -411,44 +458,6 @@
             renderList();
         };
 
-        const renderList = () => {
-            const listEl = document.getElementById("wbTopicListContainer");
-            if (!listEl) return;
-            listEl.innerHTML = "";
-
-            const allTopics = storage.get(KEY_TOPICS_ALL) || [];
-            const signedArr = storage.get(KEY_SIGNED_ARR) || [];
-
-            let filtered = allTopics;
-            if (activeTab === "signed") {
-                filtered = allTopics.filter(t => signedArr.includes(t.name));
-            } else if (activeTab === "pending") {
-                filtered = allTopics.filter(t => !signedArr.includes(t.name));
-            }
-
-            if (filtered.length === 0) {
-                listEl.appendChild(VM.createElement("div", { style: "font-size:12px;color:#a0aec0;text-align:center;padding:10px 0;" }, "暂无相关超话数据"));
-                return;
-            }
-
-            filtered.forEach(t => {
-                const isSigned = signedArr.includes(t.name);
-                const itemEl = VM.createElement("div", { className: "topicItem" },
-                    VM.createElement("span", { className: "topicName", title: t.name }, t.name),
-                    VM.createElement("span", { className: `statusBadge ${isSigned ? 'badge-success' : 'badge-pending'}` }, isSigned ? "已签到" : "待签到")
-                );
-                listEl.appendChild(itemEl);
-            });
-
-            // 更新选项卡标签文本
-            const tabAll = document.getElementById("tabAllBtn");
-            const tabSigned = document.getElementById("tabSignedBtn");
-            const tabPending = document.getElementById("tabPendingBtn");
-            if (tabAll) tabAll.textContent = `全部 (${allTopics.length})`;
-            if (tabSigned) tabSigned.textContent = `已签 (${signedArr.length})`;
-            if (tabPending) tabPending.textContent = `待签 (${Math.max(0, allTopics.length - signedArr.length)})`;
-        };
-
         const switchTab = (tab) => {
             activeTab = tab;
             document.querySelectorAll(".tabBtn").forEach(b => b.classList.remove("active"));
@@ -458,7 +467,7 @@
         };
 
         const triggerManualRun = () => {
-            toast.info("正在刷新并触发超话签到...");
+            toast.info("正在重新扫描并自动签到...");
             runCheckin(true);
         };
 
@@ -466,6 +475,7 @@
             VM.createElement("div", { className: "configContainer" },
                 VM.createElement("div", { className: "panelTitle" },
                     VM.createElement("span", null, "微博超话自动签到"),
+                    VM.createElement("span", { className: "refreshBtn", title: "重新扫描与签到", onClick: triggerManualRun }, "🔄")
                 ),
                 VM.createElement("label", { className: "cItem" },
                     VM.createElement("span", null, "自动签到"),
@@ -492,7 +502,7 @@
                         onInput: e => updateState({ TIMEOUT: parseInt(e.target.value, 10) || 2000 })
                     })
                 ),
-                VM.createElement("button", { className: "runBtn", onClick: triggerManualRun }, "一键开始签到"),
+                VM.createElement("div", { id: "statusProgressText", className: "statusText" }),
                 VM.createElement("div", { className: "tabGroup" },
                     VM.createElement("button", { id: "tabAllBtn", className: "tabBtn active", onClick: () => switchTab("all") }, "全部"),
                     VM.createElement("button", { id: "tabSignedBtn", className: "tabBtn", onClick: () => switchTab("signed") }, "已签"),
@@ -505,10 +515,17 @@
         );
     }
 
+    function setStatusText(text) {
+        const el = document.getElementById("statusProgressText");
+        if (el) el.textContent = text || "";
+    }
+
     async function runCheckin(force = false) {
         const lastCheck = storage.get(KEY_LAST_CHECK);
         if (!force && storage.get(KEY_IS_CHECK) && !isNewDay(lastCheck)) {
             toast.info("今日已完成签到");
+            setStatusText("今日已完成签到");
+            renderList();
             return;
         }
 
@@ -518,35 +535,39 @@
         }
 
         try {
+            setStatusText("正在获取关注列表...");
             const allTopics = await getInterestNameAId();
             storage.set(KEY_TOPICS_ALL, allTopics);
+            renderList();
 
             const signedArr = storage.get(KEY_SIGNED_ARR) || [];
             const pendingTopics = allTopics.filter(t => !signedArr.includes(t.name));
 
             if (pendingTopics.length === 0) {
                 toast.info("所有超话今日均已签到完成！");
+                setStatusText("所有超话已签到完成");
                 storage.set(KEY_IS_CHECK, true);
+                renderList();
                 return;
             }
 
-            toast.info(`发现 ${allTopics.length} 个超话，正在为你签到 ${pendingTopics.length} 个待签项目...`);
+            toast.info(`共关注 ${allTopics.length} 个超话，待签到 ${pendingTopics.length} 个...`);
 
             const queue = new PromiseQueue({ concurrency: 1, timeout: 600 });
+            let doneCount = 0;
+
             for (const item of pendingTopics) {
+                doneCount++;
+                setStatusText(`签到中 (${doneCount}/${pendingTopics.length}): ${item.name}`);
                 await queue.add(() => signInterest(item).catch(() => {}));
             }
 
             storage.set(KEY_IS_CHECK, true);
+            setStatusText("全部签到任务处理完毕");
             toast.success("超话自动签到任务处理完毕！");
-
-            // 刷现UI中的列表状态
-            const container = document.querySelector(".configContainer");
-            if (container && container.classList.contains("active")) {
-                const tabAll = document.getElementById("tabAllBtn");
-                if (tabAll) tabAll.click();
-            }
+            renderList();
         } catch (err) {
+            setStatusText("获取超话列表失败");
             toast.error("获取关注超话列表失败，请确认是否登录微博");
         }
     }
@@ -556,6 +577,7 @@
             if (document.body && !document.querySelector(".configContainer")) {
                 const panel = ConfigPanel();
                 document.body.appendChild(panel);
+                renderList();
             }
         };
 
