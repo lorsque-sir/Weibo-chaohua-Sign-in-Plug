@@ -37,6 +37,49 @@
   let newlyCheckedIn = 0;
   let failedCheckin = 0;
 
+  function fmtDate(d) {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+  }
+
+  class PromiseQueue {
+    constructor({ concurrency = 1, timeout = 400 } = {}) {
+      this.queue = [];
+      this.running = 0;
+      this.concurrency = concurrency;
+      this.timeout = timeout;
+    }
+    add(fn) {
+      return new Promise((resolve, reject) => {
+        const task = async () => {
+          try {
+            const res = await fn();
+            if (this.timeout > 0) {
+              await new Promise(r => setTimeout(r, this.timeout));
+            }
+            resolve(res);
+          } catch (err) {
+            reject(err);
+          } finally {
+            this.running--;
+            this.processQueue();
+          }
+        };
+        this.queue.push(task);
+        this.processQueue();
+      });
+    }
+    processQueue() {
+      while (this.running < this.concurrency && this.queue.length > 0) {
+        this.running++;
+        const task = this.queue.shift();
+        task();
+      }
+    }
+  }
+
   const headers = {
     'Accept': 'application/json, text/plain, */*',
     'MWeibo-Pwa': '1',
@@ -271,10 +314,19 @@
     totalTopics = 0; checkedInBefore = 0; newlyCheckedIn = 0; failedCheckin = 0; updateStats();
     log('=== 开始自动签到 ===');
 
+    const todayStr = fmtDate(new Date());
+    const savedData = await storageGet(['lastRunDate', 'signedTopics']);
+    let signedTopics = savedData.signedTopics || [];
+    if (savedData.lastRunDate !== todayStr) {
+      signedTopics = [];
+    }
+
     const data = await getSupertopicList();
     if (!data) { log('获取超话列表失败'); finishRun(); return; }
 
     const cards = data?.data?.cards || [];
+    const queue = new PromiseQueue({ concurrency: 1, timeout: 400 });
+
     for (const card of cards) {
       if (!running) break;
       const groups = card?.card_group || [];
@@ -284,6 +336,16 @@
         totalTopics += 1;
         const topicName = item.title_sub;
         const desc1 = item.desc1 || '';
+
+        // 检查断点：如果今日已经记录签到
+        if (signedTopics.includes(topicName)) {
+          checkedInBefore += 1;
+          log(`✓ ${topicName} - [断点续签] 今日已签到`);
+          addRow(topicName, '已签到', desc1, '已签到（本地纪录）');
+          updateStats();
+          continue;
+        }
+
         let canCheckin = false;
         let checkinScheme = '';
         let buttonStatus = '未知';
@@ -298,6 +360,7 @@
           } else if (['已签', '已签到', '今日已签', '明日再来'].includes(name) || name.includes('已签')) {
             checkedInBefore += 1;
             buttonStatus = '已签到';
+            if (!signedTopics.includes(topicName)) signedTopics.push(topicName);
             log(`✓ ${topicName} - 今日已签到`);
             break;
           }
@@ -305,31 +368,41 @@
 
         let actionResult = '';
         if (canCheckin && checkinScheme) {
-          const success = await performCheckin(topicName, checkinScheme);
+          const success = await queue.add(() => performCheckin(topicName, checkinScheme));
           if (success) {
             newlyCheckedIn += 1;
             actionResult = '签到成功';
+            if (!signedTopics.includes(topicName)) signedTopics.push(topicName);
             log(`✓ ${topicName} - 签到成功`);
           } else {
             failedCheckin += 1;
             actionResult = '签到失败';
             log(`✗ ${topicName} - 签到失败`);
           }
-          await new Promise(r => setTimeout(r, 400 + Math.floor(Math.random() * 300)));
         } else if (buttonStatus === '已签到') {
           actionResult = '已签到';
         } else {
           actionResult = '无需签到';
         }
 
+        await storageSet({ signedTopics, lastRunDate: todayStr });
         addRow(topicName, buttonStatus, desc1, actionResult);
         updateStats();
       }
     }
 
+    await storageSet({
+      lastRunDate: todayStr,
+      signedTopics,
+      lastResult: {
+        ts: Date.now(),
+        totalTopics, checkedInBefore, newlyCheckedIn, failedCheckin,
+      }
+    });
+
     log('=== 签到完成统计 ===');
     log(`总共关注超话：${totalTopics}个`);
-    log(`之前已签到：${checkedInBefore}个`);
+    log(`之前/断点已签：${checkedInBefore}个`);
     log(`本次新签到：${newlyCheckedIn}个`);
     log(`签到失败：${failedCheckin}个`);
     const completionRate = ((checkedInBefore + newlyCheckedIn) / Math.max(totalTopics, 1)) * 100;

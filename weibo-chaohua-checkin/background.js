@@ -5,7 +5,44 @@
     settings: 'settings', // { enableDaily: boolean, dailyTime: 'HH:MM' }
     lastRunDate: 'lastRunDate', // 'YYYY-MM-DD'
     lastResult: 'lastResult', // { ts, totalTopics, checkedInBefore, newlyCheckedIn, failedCheckin }
+    signedTopics: 'signedTopics', // 今日已签超话名称列表
   };
+
+  class PromiseQueue {
+    constructor({ concurrency = 1, timeout = 400 } = {}) {
+      this.queue = [];
+      this.running = 0;
+      this.concurrency = concurrency;
+      this.timeout = timeout;
+    }
+    add(fn) {
+      return new Promise((resolve, reject) => {
+        const task = async () => {
+          try {
+            const res = await fn();
+            if (this.timeout > 0) {
+              await new Promise(r => setTimeout(r, this.timeout));
+            }
+            resolve(res);
+          } catch (err) {
+            reject(err);
+          } finally {
+            this.running--;
+            this.processQueue();
+          }
+        };
+        this.queue.push(task);
+        this.processQueue();
+      });
+    }
+    processQueue() {
+      while (this.running < this.concurrency && this.queue.length > 0) {
+        this.running++;
+        const task = this.queue.shift();
+        task();
+      }
+    }
+  }
 
   const headers = {
     'Accept': 'application/json, text/plain, */*',
@@ -205,39 +242,70 @@
       await setInStorage({ lastResult: { ts: Date.now(), error: 'list_failed' } });
       return false;
     }
+
+    const todayStr = fmtDate(new Date());
+    const savedRunDate = await getFromStorage(STORAGE_KEYS.lastRunDate);
+    let signedTopics = (await getFromStorage(STORAGE_KEYS.signedTopics)) || [];
+    if (savedRunDate !== todayStr) {
+      signedTopics = [];
+    }
+
     const cards = data?.data?.cards || [];
+    const queue = new PromiseQueue({ concurrency: 1, timeout: 400 });
+    const tasks = [];
+
     for (const card of cards) {
       const groups = card?.card_group || [];
       for (const item of groups) {
         if (!item?.title_sub || !item?.buttons) continue;
         totalTopics += 1;
         const topicName = item.title_sub;
+
+        if (signedTopics.includes(topicName)) {
+          checkedInBefore += 1;
+          continue;
+        }
+
         let canCheckin = false;
         let checkinScheme = '';
-        let buttonStatus = '未知';
         for (const btn of item.buttons) {
           const name = btn?.name || '';
           if (name === '签到') {
             canCheckin = true;
             checkinScheme = btn?.scheme || '';
-            buttonStatus = '可签到';
             break;
           } else if (['已签', '已签到', '明日再来'].includes(name)) {
             checkedInBefore += 1;
-            buttonStatus = '已签到';
+            if (!signedTopics.includes(topicName)) {
+              signedTopics.push(topicName);
+            }
             break;
           }
         }
         if (canCheckin && checkinScheme) {
-          const success = await performCheckin(topicName, checkinScheme);
-          if (success) newlyCheckedIn += 1; else failedCheckin += 1;
-          await new Promise(r => setTimeout(r, 400));
+          tasks.push({ topicName, checkinScheme });
         }
       }
     }
-    const lastRunDate = fmtDate(new Date());
+
+    await setInStorage({ [STORAGE_KEYS.signedTopics]: signedTopics, [STORAGE_KEYS.lastRunDate]: todayStr });
+
+    for (const task of tasks) {
+      const success = await queue.add(() => performCheckin(task.topicName, task.checkinScheme));
+      if (success) {
+        newlyCheckedIn += 1;
+        if (!signedTopics.includes(task.topicName)) {
+          signedTopics.push(task.topicName);
+        }
+      } else {
+        failedCheckin += 1;
+      }
+      await setInStorage({ [STORAGE_KEYS.signedTopics]: signedTopics });
+    }
+
     await setInStorage({
-      [STORAGE_KEYS.lastRunDate]: lastRunDate,
+      [STORAGE_KEYS.lastRunDate]: todayStr,
+      [STORAGE_KEYS.signedTopics]: signedTopics,
       lastResult: {
         ts: Date.now(),
         totalTopics, checkedInBefore, newlyCheckedIn, failedCheckin,
