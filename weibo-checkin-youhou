@@ -304,18 +304,20 @@
     }
 
     class PromiseQueue {
-        constructor({ concurrency = 1, timeout = 500 } = {}) {
+        constructor({ concurrency = 1, minTimeout = 1000, maxTimeout = 1800 } = {}) {
             this.queue = [];
             this.running = 0;
             this.concurrency = concurrency;
-            this.timeout = timeout;
+            this.minTimeout = minTimeout;
+            this.maxTimeout = maxTimeout;
         }
         add(fn) {
             return new Promise((resolve, reject) => {
                 const task = async () => {
                     try {
                         const res = await fn();
-                        await delay(this.timeout);
+                        const randomDelay = this.minTimeout + Math.floor(Math.random() * (this.maxTimeout - this.minTimeout));
+                        await delay(randomDelay);
                         resolve(res);
                     } catch (err) {
                         reject(err);
@@ -382,12 +384,15 @@
         return msg.replace(/\(\d+\)/g, "").trim();
     }
 
-    function signInterest({ id, name }) {
-        return new Promise((resolve, reject) => {
-            signInterestAPI(id).then(resp => {
+    async function signInterest({ id, name }, retries = 2) {
+        let attempt = 0;
+        while (attempt <= retries) {
+            try {
+                const resp = await signInterestAPI(id);
                 const { data } = resp;
                 const signedArr = storage.get(KEY_SIGNED_ARR) || [];
-                if (data.code === "100000") {
+
+                if (data && data.code === "100000") {
                     toast.success(`[${name}] 签到成功！`);
                     storage.set(KEY_LAST_CHECK, Date.now());
                     if (!signedArr.includes(name)) {
@@ -395,27 +400,47 @@
                         storage.set(KEY_SIGNED_ARR, signedArr);
                     }
                     if (window.renderWBTopicList) window.renderWBTopicList();
-                    resolve({ ok: true, name });
-                } else {
-                    const displayMsg = cleanToastMsg(data.msg);
-                    toast.warn(`[${name}] ${displayMsg}`);
-                    if (data.code === 382004 || data.msg?.includes("已签")) {
-                        storage.set(KEY_LAST_CHECK, Date.now());
-                        if (!signedArr.includes(name)) {
-                            signedArr.push(name);
-                            storage.set(KEY_SIGNED_ARR, signedArr);
-                        }
-                        if (window.renderWBTopicList) window.renderWBTopicList();
-                        resolve({ ok: true, name });
-                    } else {
-                        reject(data.msg);
-                    }
+                    return { ok: true, name };
                 }
-            }).catch(err => {
-                toast.error(`[${name}] 签到网络请求失败`);
-                reject(err);
-            });
-        });
+
+                const msgStr = data?.msg || "";
+                const displayMsg = cleanToastMsg(msgStr);
+
+                // 限流冷却：若提示频繁/太快/100002，挂起冷却 4 秒
+                if (msgStr.includes("频繁") || msgStr.includes("太快") || data?.code === "100002") {
+                    toast.warn(`[${name}] 触发微博限流保护，冷却 4 秒后重试...`);
+                    await delay(4000);
+                }
+
+                if (data?.code === 382004 || msgStr.includes("已签")) {
+                    toast.warn(`[${name}] ${displayMsg}`);
+                    storage.set(KEY_LAST_CHECK, Date.now());
+                    if (!signedArr.includes(name)) {
+                        signedArr.push(name);
+                        storage.set(KEY_SIGNED_ARR, signedArr);
+                    }
+                    if (window.renderWBTopicList) window.renderWBTopicList();
+                    return { ok: true, name };
+                }
+
+                if (attempt < retries) {
+                    attempt++;
+                    await delay(1500 * attempt);
+                    continue;
+                }
+
+                toast.error(`[${name}] 签到失败: ${displayMsg}`);
+                throw new Error(displayMsg);
+            } catch (err) {
+                if (attempt < retries) {
+                    attempt++;
+                    await delay(1500 * attempt);
+                    continue;
+                }
+                toast.error(`[${name}] 签到网络异常`);
+                throw err;
+            }
+        }
     }
 
     // Config & UI Panel
@@ -550,22 +575,6 @@
         const lastCheck = storage.get(KEY_LAST_CHECK);
         let allTopics = storage.get(KEY_TOPICS_ALL) || [];
 
-        // 保底补全：若全量超话列表缺失，即使判定已签到，也自动补拉一次关注列表
-        if (allTopics.length === 0) {
-            try {
-                setStatusText("正在获取关注列表...");
-                allTopics = await getInterestNameAId();
-                storage.set(KEY_TOPICS_ALL, allTopics);
-            } catch (err) {}
-        }
-
-        if (!force && storage.get(KEY_IS_CHECK) && !isNewDay(lastCheck)) {
-            toast.info("今日已完成签到");
-            setStatusText("今日已完成签到");
-            renderList();
-            return;
-        }
-
         if (isNewDay(lastCheck)) {
             storage.remove(KEY_SIGNED_ARR);
             storage.set(KEY_IS_CHECK, false);
@@ -579,8 +588,16 @@
             }
             renderList();
 
-            const signedArr = storage.get(KEY_SIGNED_ARR) || [];
-            const pendingTopics = allTopics.filter(t => !signedArr.includes(t.name));
+            let signedArr = storage.get(KEY_SIGNED_ARR) || [];
+            let pendingTopics = allTopics.filter(t => !signedArr.includes(t.name));
+
+            // 只有当非强刷、已标记完成，且待签超话确实为 0 时，才判定为完全结束
+            if (!force && storage.get(KEY_IS_CHECK) && pendingTopics.length === 0 && !isNewDay(lastCheck)) {
+                toast.info("今日所有超话已完成签到");
+                setStatusText("今日已完成签到");
+                renderList();
+                return;
+            }
 
             if (pendingTopics.length === 0) {
                 toast.info("所有超话今日均已签到完成！");
@@ -590,7 +607,7 @@
                 return;
             }
 
-            toast.info(`共关注 ${allTopics.length} 个超话，待签到 ${pendingTopics.length} 个...`);
+            toast.info(`发现 ${pendingTopics.length} 个待签超话（总关注 ${allTopics.length} 个），正在为您签到...`);
 
             const queue = new PromiseQueue({ concurrency: 1, timeout: 600 });
             let doneCount = 0;
@@ -601,9 +618,17 @@
                 await queue.add(() => signInterest(item).catch(() => {}));
             }
 
-            storage.set(KEY_IS_CHECK, true);
-            setStatusText("全部签到任务处理完毕");
-            toast.success("超话自动签到任务处理完毕！");
+            const updatedSigned = storage.get(KEY_SIGNED_ARR) || [];
+            const remaining = allTopics.filter(t => !updatedSigned.includes(t.name));
+            if (remaining.length === 0) {
+                storage.set(KEY_IS_CHECK, true);
+                setStatusText("全部签到任务处理完毕");
+                toast.success("超话自动签到任务处理完毕！");
+            } else {
+                storage.set(KEY_IS_CHECK, false);
+                setStatusText(`签到处理完成，剩余 ${remaining.length} 个未成功`);
+                toast.warn(`部分超话未签上，仍然剩余 ${remaining.length} 个待签项`);
+            }
             renderList();
         } catch (err) {
             setStatusText("获取超话列表失败");

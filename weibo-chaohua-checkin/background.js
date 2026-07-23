@@ -9,20 +9,20 @@
   };
 
   class PromiseQueue {
-    constructor({ concurrency = 1, timeout = 400 } = {}) {
+    constructor({ concurrency = 1, minTimeout = 800, maxTimeout = 1500 } = {}) {
       this.queue = [];
       this.running = 0;
       this.concurrency = concurrency;
-      this.timeout = timeout;
+      this.minTimeout = minTimeout;
+      this.maxTimeout = maxTimeout;
     }
     add(fn) {
       return new Promise((resolve, reject) => {
         const task = async () => {
           try {
             const res = await fn();
-            if (this.timeout > 0) {
-              await new Promise(r => setTimeout(r, this.timeout));
-            }
+            const randomDelay = this.minTimeout + Math.floor(Math.random() * (this.maxTimeout - this.minTimeout));
+            await new Promise(r => setTimeout(r, randomDelay));
             resolve(res);
           } catch (err) {
             reject(err);
