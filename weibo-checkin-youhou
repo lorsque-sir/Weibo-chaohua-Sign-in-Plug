@@ -125,12 +125,20 @@
         font-weight: 600;
     }
     .topicListContainer {
-        max-height: 240px;
+        height: 240px;
         overflow-y: auto;
         border: 1px solid #edf2f7;
         border-radius: 6px;
         padding: 4px 8px;
         background: #f7fafc;
+        display: flex;
+        flex-direction: column;
+    }
+    .emptyTopicText {
+        font-size: 12px;
+        color: #a0aec0;
+        text-align: center;
+        margin: auto;
     }
     .topicItem {
         display: flex;
@@ -472,7 +480,7 @@
         }
 
         if (filtered.length === 0) {
-            listEl.appendChild(VM.createElement("div", { style: "font-size:12px;color:#a0aec0;text-align:center;padding:10px 0;" }, "暂无相关超话数据"));
+            listEl.appendChild(VM.createElement("div", { className: "emptyTopicText" }, "暂无相关超话数据"));
         } else {
             filtered.forEach((t, index) => {
                 const isSigned = signedArr.includes(t.name);
