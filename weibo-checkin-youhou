@@ -393,7 +393,8 @@
                 const signedArr = storage.get(KEY_SIGNED_ARR) || [];
 
                 if (data && data.code === "100000") {
-                    toast.success(`[${name}] 签到成功！`);
+                    const extraInfo = data.data?.alert_title ? ` --- ${data.data.alert_title}` : (data.msg ? ` (${data.msg})` : "");
+                    toast.success(`[${name}] 签到成功！${extraInfo}`);
                     storage.set(KEY_LAST_CHECK, Date.now());
                     if (!signedArr.includes(name)) {
                         signedArr.push(name);
