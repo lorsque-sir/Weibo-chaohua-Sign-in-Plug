@@ -3,8 +3,10 @@
 // @description  用户登录后进入微博主页，获取超级话题并自动签到，内置状态面板与已签/待签详情查看（支持实时刷新与序号显示）
 // @homepageURL  https://github.com/Deuscx/WB_SIGN_EXT
 // @supportURL   https://github.com/Deuscx/WB_SIGN_EXT/issues
-// @grant        none
-// @version      2.3.0
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_deleteValue
+// @version      2.3.1
 // @author       deus
 // @match        https://weibo.com/*
 // @match        https://www.weibo.com/*
@@ -208,7 +210,8 @@
 
     function formatDateStr(ts) {
         if (!ts) return "";
-        const d = new Date(ts);
+        const d = new Date(typeof ts === "string" && !isNaN(Number(ts)) ? Number(ts) : ts);
+        if (isNaN(d.getTime())) return "";
         const y = d.getFullYear();
         const m = String(d.getMonth() + 1).padStart(2, "0");
         const day = String(d.getDate()).padStart(2, "0");
@@ -217,16 +220,40 @@
 
     const isNewDay = ts => {
         if (!ts) return true;
-        return formatDateStr(ts) !== formatDateStr(Date.now());
+        const dateStr = formatDateStr(ts);
+        if (!dateStr) return true;
+        return dateStr !== formatDateStr(Date.now());
     };
 
     const storage = {
-        set: (k, v) => localStorage.setItem(k, JSON.stringify(v)),
+        set: (k, v) => {
+            try {
+                if (typeof GM_setValue !== "undefined") {
+                    GM_setValue(k, JSON.stringify(v));
+                }
+            } catch (e) {}
+            localStorage.setItem(k, JSON.stringify(v));
+        },
         get: (k) => {
-            const v = localStorage.getItem(k);
+            let v;
+            try {
+                if (typeof GM_getValue !== "undefined") {
+                    v = GM_getValue(k);
+                }
+            } catch (e) {}
+            if (v === undefined || v === null) {
+                v = localStorage.getItem(k);
+            }
             try { return JSON.parse(v); } catch (e) { return v; }
         },
-        remove: (k) => localStorage.removeItem(k)
+        remove: (k) => {
+            try {
+                if (typeof GM_deleteValue !== "undefined") {
+                    GM_deleteValue(k);
+                }
+            } catch (e) {}
+            localStorage.removeItem(k);
+        }
     };
 
     const idGen = (e => () => e++)(0);
@@ -361,7 +388,7 @@
                 const maxPage = data.max_page || 1;
                 const topics = list.map(item => ({
                     id: item.oid ? item.oid.slice(5) : "",
-                    name: item.topic_name || ""
+                    name: (item.topic_name || "").trim()
                 }));
                 if (page < maxPage) {
                     getInterestNameAId(page + 1).then(nextList => resolve(topics.concat(nextList))).catch(() => resolve(topics));
@@ -393,6 +420,7 @@
     }
 
     async function signInterest({ id, name }, retries = 2) {
+        name = (name || "").trim();
         let attempt = 0;
         while (attempt <= retries) {
             try {
@@ -461,10 +489,10 @@
         listEl.innerHTML = "";
 
         let allTopics = storage.get(KEY_TOPICS_ALL) || [];
-        const signedArr = storage.get(KEY_SIGNED_ARR) || [];
+        const signedArr = (storage.get(KEY_SIGNED_ARR) || []).map(n => (n || "").trim());
 
         // 并集融合保护：防止 signedArr 里有但 allTopics 缺失的情况
-        const allNames = new Set(allTopics.map(t => t.name));
+        const allNames = new Set(allTopics.map(t => (t.name || "").trim()));
         signedArr.forEach(name => {
             if (!allNames.has(name)) {
                 allTopics.push({ id: "", name });
@@ -474,16 +502,16 @@
 
         let filtered = allTopics;
         if (activeTab === "signed") {
-            filtered = allTopics.filter(t => signedArr.includes(t.name));
+            filtered = allTopics.filter(t => signedArr.includes((t.name || "").trim()));
         } else if (activeTab === "pending") {
-            filtered = allTopics.filter(t => !signedArr.includes(t.name));
+            filtered = allTopics.filter(t => !signedArr.includes((t.name || "").trim()));
         }
 
         if (filtered.length === 0) {
             listEl.appendChild(VM.createElement("div", { className: "emptyTopicText" }, "暂无相关超话数据"));
         } else {
             filtered.forEach((t, index) => {
-                const isSigned = signedArr.includes(t.name);
+                const isSigned = signedArr.includes((t.name || "").trim());
                 const itemEl = VM.createElement("div", { className: "topicItem" },
                     VM.createElement("div", { className: "topicLeft" },
                         VM.createElement("span", { className: "topicIndex" }, `${index + 1}.`),
@@ -528,6 +556,7 @@
 
         const triggerManualRun = () => {
             toast.info("正在重新扫描并自动签到...");
+            storage.remove(KEY_TOPICS_ALL);
             runCheckin(true);
         };
 
@@ -582,28 +611,34 @@
 
     async function runCheckin(force = false) {
         const lastCheck = storage.get(KEY_LAST_CHECK);
-        let allTopics = storage.get(KEY_TOPICS_ALL) || [];
 
         if (isNewDay(lastCheck)) {
             storage.remove(KEY_SIGNED_ARR);
+            storage.remove(KEY_TOPICS_ALL);
             storage.set(KEY_IS_CHECK, false);
         }
+
+        let allTopics = storage.get(KEY_TOPICS_ALL) || [];
 
         try {
             if (allTopics.length === 0) {
                 setStatusText("正在获取关注列表...");
                 allTopics = await getInterestNameAId();
+                allTopics = allTopics.map(t => ({ id: t.id, name: (t.name || "").trim() }));
                 storage.set(KEY_TOPICS_ALL, allTopics);
             }
             renderList();
 
-            let signedArr = storage.get(KEY_SIGNED_ARR) || [];
-            let pendingTopics = allTopics.filter(t => !signedArr.includes(t.name));
+            let signedArr = (storage.get(KEY_SIGNED_ARR) || []).map(n => (n || "").trim());
+            let pendingTopics = allTopics.filter(t => !signedArr.includes((t.name || "").trim()));
 
-            // 只有当非强刷、已标记完成，且待签超话确实为 0 时，才判定为完全结束
-            if (!force && storage.get(KEY_IS_CHECK) && pendingTopics.length === 0 && !isNewDay(lastCheck)) {
-                toast.info("今日所有超话已完成签到");
+            const isCheckedToday = storage.get(KEY_IS_CHECK) === true && !isNewDay(lastCheck);
+
+            // 如果不是强制刷新，且今日已完全签到或没有待签项目，直接退出，不再次触发表单/气泡
+            if (!force && (isCheckedToday || (pendingTopics.length === 0 && !isNewDay(lastCheck)))) {
                 setStatusText("今日已完成签到");
+                storage.set(KEY_IS_CHECK, true);
+                storage.set(KEY_LAST_CHECK, Date.now());
                 renderList();
                 return;
             }
@@ -612,13 +647,14 @@
                 toast.info("所有超话今日均已签到完成！");
                 setStatusText("所有超话已签到完成");
                 storage.set(KEY_IS_CHECK, true);
+                storage.set(KEY_LAST_CHECK, Date.now());
                 renderList();
                 return;
             }
 
             toast.info(`发现 ${pendingTopics.length} 个待签超话（总关注 ${allTopics.length} 个），正在为您签到...`);
 
-            const queue = new PromiseQueue({ concurrency: 1, timeout: 600 });
+            const queue = new PromiseQueue({ concurrency: 1, minTimeout: 1000, maxTimeout: 1800 });
             let doneCount = 0;
 
             for (const item of pendingTopics) {
@@ -627,8 +663,11 @@
                 await queue.add(() => signInterest(item).catch(() => {}));
             }
 
-            const updatedSigned = storage.get(KEY_SIGNED_ARR) || [];
-            const remaining = allTopics.filter(t => !updatedSigned.includes(t.name));
+            const updatedSigned = (storage.get(KEY_SIGNED_ARR) || []).map(n => (n || "").trim());
+            const remaining = allTopics.filter(t => !updatedSigned.includes((t.name || "").trim()));
+
+            storage.set(KEY_LAST_CHECK, Date.now());
+
             if (remaining.length === 0) {
                 storage.set(KEY_IS_CHECK, true);
                 setStatusText("全部签到任务处理完毕");
