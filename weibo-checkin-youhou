@@ -1,12 +1,16 @@
 // ==UserScript==
 // @name         微博超话自动签到
-// @description  用户登录后进入微博主页，获取超级话题并自动签到，内置状态面板与已签/待签详情查看（支持实时刷新与序号显示）
+// @description  用户登录后进入微博主页，获取超级话题并自动签到，支持跨设备/手动已签状态自动识别，内置状态面板与已签/待签详情查看（支持实时刷新与序号显示）
 // @homepageURL  https://github.com/Deuscx/WB_SIGN_EXT
 // @supportURL   https://github.com/Deuscx/WB_SIGN_EXT/issues
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_deleteValue
-// @version      2.3.1
+// @grant        GM_xmlhttpRequest
+// @connect      m.weibo.cn
+// @connect      weibo.cn
+// @connect      weibo.com
+// @version      2.4.0
 // @author       deus
 // @match        https://weibo.com/*
 // @match        https://www.weibo.com/*
@@ -374,6 +378,150 @@
         }
     }
 
+    // 跨域网络请求封装：优先使用 GM_xmlhttpRequest（可携带当前 Cookie 且无 CORS 限制），环境不支持时降级为 fetch
+    function gmFetchJson(url, options = {}) {
+        return new Promise((resolve, reject) => {
+            const timeout = options.timeout || 15000;
+            const headers = Object.assign({
+                "Accept": "application/json, text/plain, */*",
+                "MWeibo-Pwa": "1",
+                "Referer": "https://m.weibo.cn/p/tabbar?containerid=100803_-_recentvisit&page_type=tabbar",
+                "X-Requested-With": "XMLHttpRequest",
+                "Cookie": document.cookie || ""
+            }, options.headers || {});
+
+            if (typeof GM_xmlhttpRequest !== "undefined") {
+                GM_xmlhttpRequest({
+                    method: options.method || "GET",
+                    url: url,
+                    headers: headers,
+                    timeout: timeout,
+                    onload: (res) => {
+                        if (res.status >= 200 && res.status < 300) {
+                            try {
+                                resolve(JSON.parse(res.responseText));
+                            } catch (e) {
+                                reject(new Error("JSON解析失败: " + e.message));
+                            }
+                        } else {
+                            reject(new Error(`HTTP ${res.status}`));
+                        }
+                    },
+                    onerror: (err) => reject(new Error("网络请求失败: " + (err?.statusText || "未知错误"))),
+                    ontimeout: () => reject(new Error("请求超时"))
+                });
+            } else {
+                fetch(url, {
+                    method: options.method || "GET",
+                    headers: headers,
+                    credentials: "include"
+                })
+                .then(r => {
+                    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                    return r.json();
+                })
+                .then(resolve)
+                .catch(reject);
+            }
+        });
+    }
+
+    // 从移动端接口获取关注超话，并直接识别服务端当天的实时签到状态（针对在手机端或其他设备已签到的超话）
+    async function getTopicsFromMWeibo() {
+        const allCards = [];
+        let sinceId = undefined;
+        let pageCount = 0;
+        const maxPages = 30; // 最多30页保护
+
+        while (pageCount < maxPages) {
+            pageCount++;
+            let url = "https://m.weibo.cn/api/container/getIndex?containerid=100803_-_followsuper";
+            if (sinceId) {
+                url += `&since_id=${encodeURIComponent(sinceId)}`;
+            }
+
+            const data = await gmFetchJson(url, { timeout: 12000 });
+            if (data?.ok !== 1 || !data?.data) {
+                if (pageCount === 1) {
+                    throw new Error("移动端接口未返回有效数据");
+                }
+                break;
+            }
+
+            const cards = data.data.cards || [];
+            allCards.push(...cards);
+
+            const info = data.data.cardlistInfo || {};
+            sinceId = info.since_id;
+            if (!sinceId) break;
+
+            await delay(350 + Math.floor(Math.random() * 200));
+        }
+
+        const topics = [];
+        const signedSet = new Set();
+
+        for (const card of allCards) {
+            const groups = card?.card_group || [];
+            for (const item of groups) {
+                if (!item?.title_sub) continue;
+                const name = (item.title_sub || "").trim();
+                if (!name) continue;
+
+                // 提取超话 ID (用于后续可能的签到)
+                let topicId = "";
+                if (item.containerid) {
+                    topicId = item.containerid.replace(/^1022:/, "");
+                } else if (item.scheme) {
+                    const m = item.scheme.match(/100808[a-zA-Z0-9_-]+/);
+                    if (m) topicId = m[0];
+                }
+                if (!topicId && item.buttons?.[0]?.scheme) {
+                    const m = item.buttons[0].scheme.match(/100808[a-zA-Z0-9_-]+/);
+                    if (m) topicId = m[0];
+                }
+
+                // 核心：识别是否已签到
+                // 在移动端接口中，已签到的超话按钮文案通常为“已签到”或“明日再来”，或者在 desc1 中带有“已签到”
+                let isSigned = false;
+                if (Array.isArray(item.buttons)) {
+                    for (const btn of item.buttons) {
+                        const bName = (btn?.name || "").trim();
+                        if (["已签", "已签到", "今日已签", "明日再来"].includes(bName) || bName.includes("已签")) {
+                            isSigned = true;
+                            break;
+                        }
+                    }
+                }
+                const desc1 = item.desc1 || "";
+                if (!isSigned && (desc1.includes("已签") || desc1.includes("明日再来"))) {
+                    isSigned = true;
+                }
+
+                if (isSigned) {
+                    signedSet.add(name);
+                }
+
+                topics.push({
+                    id: topicId,
+                    name,
+                    isSigned,
+                    scheme: item.buttons?.[0]?.scheme || ""
+                });
+            }
+        }
+
+        if (topics.length === 0) {
+            throw new Error("移动端接口未解析出有效超话列表");
+        }
+
+        return {
+            topics,
+            signedNames: Array.from(signedSet)
+        };
+    }
+
+    // PC 端网页接口获取关注超话（作为备用兜底降级方案，同时支持状态探测）
     function getInterestNameAId(page = 1) {
         return new Promise((resolve, reject) => {
             axiosInstance({
@@ -386,10 +534,30 @@
                 }
                 const list = data.list || [];
                 const maxPage = data.max_page || 1;
-                const topics = list.map(item => ({
-                    id: item.oid ? item.oid.slice(5) : "",
-                    name: (item.topic_name || "").trim()
-                }));
+                const topics = list.map(item => {
+                    const name = (item.topic_name || "").trim();
+                    let isSigned = false;
+                    if (item.is_sign === 1 || item.is_sign === true || item.is_signed === 1 || item.sign_status === 1) {
+                        isSigned = true;
+                    } else if (typeof item.desc1 === "string" && item.desc1.includes("已签")) {
+                        isSigned = true;
+                    } else if (typeof item.desc === "string" && item.desc.includes("已签")) {
+                        isSigned = true;
+                    } else if (Array.isArray(item.buttons)) {
+                        for (const b of item.buttons) {
+                            const bName = b?.name || "";
+                            if (bName.includes("已签") || bName === "明日再来") {
+                                isSigned = true;
+                                break;
+                            }
+                        }
+                    }
+                    return {
+                        id: item.oid ? item.oid.slice(5) : "",
+                        name,
+                        isSigned
+                    };
+                });
                 if (page < maxPage) {
                     getInterestNameAId(page + 1).then(nextList => resolve(topics.concat(nextList))).catch(() => resolve(topics));
                 } else {
@@ -397,6 +565,25 @@
                 }
             }).catch(err => reject(err));
         });
+    }
+
+    // 综合调度器：优先获取带签到状态的移动端数据，遇异常自动回退到网页端
+    async function fetchTopicsWithStatus() {
+        try {
+            const mResult = await getTopicsFromMWeibo();
+            if (mResult && mResult.topics.length > 0) {
+                return mResult;
+            }
+        } catch (err) {
+            console.warn("[微博超话自动签到] 移动端实时状态接口调用异常，已自动回退到PC端接口:", err.message || err);
+        }
+
+        const pcTopics = await getInterestNameAId();
+        const signedNames = pcTopics.filter(t => t.isSigned).map(t => t.name);
+        return {
+            topics: pcTopics,
+            signedNames
+        };
     }
 
     function signInterestAPI(topicId) {
@@ -414,50 +601,74 @@
         });
     }
 
+    async function signInterestMobile(scheme) {
+        if (!scheme) throw new Error("没有移动端签到链接");
+        const fullUrl = scheme.startsWith("http") ? scheme : `https://m.weibo.cn${scheme}`;
+        const data = await gmFetchJson(fullUrl, { timeout: 10000 });
+        return data?.ok === 1;
+    }
+
     function cleanToastMsg(msg) {
         if (!msg) return "已签到";
         return msg.replace(/\(\d+\)/g, "").trim();
     }
 
-    async function signInterest({ id, name }, retries = 2) {
+    async function signInterest({ id, name, scheme }, retries = 2) {
         name = (name || "").trim();
         let attempt = 0;
         while (attempt <= retries) {
             try {
-                const resp = await signInterestAPI(id);
-                const { data } = resp;
-                const signedArr = storage.get(KEY_SIGNED_ARR) || [];
+                // 如果有 topicId，优先走 PC 端标准签到接口
+                if (id) {
+                    const resp = await signInterestAPI(id);
+                    const { data } = resp;
+                    const signedArr = storage.get(KEY_SIGNED_ARR) || [];
 
-                if (data && data.code === "100000") {
-                    const extraInfo = data.data?.alert_title ? ` --- ${data.data.alert_title}` : (data.msg ? ` (${data.msg})` : "");
-                    toast.success(`[${name}] 签到成功！${extraInfo}`);
-                    storage.set(KEY_LAST_CHECK, Date.now());
-                    if (!signedArr.includes(name)) {
-                        signedArr.push(name);
-                        storage.set(KEY_SIGNED_ARR, signedArr);
+                    if (data && data.code === "100000") {
+                        const extraInfo = data.data?.alert_title ? ` --- ${data.data.alert_title}` : (data.msg ? ` (${data.msg})` : "");
+                        toast.success(`[${name}] 签到成功！${extraInfo}`);
+                        storage.set(KEY_LAST_CHECK, Date.now());
+                        if (!signedArr.includes(name)) {
+                            signedArr.push(name);
+                            storage.set(KEY_SIGNED_ARR, signedArr);
+                        }
+                        if (window.renderWBTopicList) window.renderWBTopicList();
+                        return { ok: true, name };
                     }
-                    if (window.renderWBTopicList) window.renderWBTopicList();
-                    return { ok: true, name };
-                }
 
-                const msgStr = data?.msg || "";
-                const displayMsg = cleanToastMsg(msgStr);
+                    const msgStr = data?.msg || "";
+                    const displayMsg = cleanToastMsg(msgStr);
 
-                // 限流冷却：若提示频繁/太快/100002，挂起冷却 4 秒
-                if (msgStr.includes("频繁") || msgStr.includes("太快") || data?.code === "100002") {
-                    toast.warn(`[${name}] 触发微博限流保护，冷却 4 秒后重试...`);
-                    await delay(4000);
-                }
-
-                if (data?.code === 382004 || msgStr.includes("已签")) {
-                    toast.warn(`[${name}] ${displayMsg}`);
-                    storage.set(KEY_LAST_CHECK, Date.now());
-                    if (!signedArr.includes(name)) {
-                        signedArr.push(name);
-                        storage.set(KEY_SIGNED_ARR, signedArr);
+                    // 限流冷却：若提示频繁/太快/100002，挂起冷却 4 秒
+                    if (msgStr.includes("频繁") || msgStr.includes("太快") || data?.code === "100002") {
+                        toast.warn(`[${name}] 触发微博限流保护，冷却 4 秒后重试...`);
+                        await delay(4000);
                     }
-                    if (window.renderWBTopicList) window.renderWBTopicList();
-                    return { ok: true, name };
+
+                    if (data?.code === 382004 || msgStr.includes("已签")) {
+                        toast.warn(`[${name}] ${displayMsg}`);
+                        storage.set(KEY_LAST_CHECK, Date.now());
+                        if (!signedArr.includes(name)) {
+                            signedArr.push(name);
+                            storage.set(KEY_SIGNED_ARR, signedArr);
+                        }
+                        if (window.renderWBTopicList) window.renderWBTopicList();
+                        return { ok: true, name };
+                    }
+                } else if (scheme) {
+                    // 没有 topicId 但有移动端签到 scheme
+                    const ok = await signInterestMobile(scheme);
+                    if (ok) {
+                        toast.success(`[${name}] 签到成功！`);
+                        storage.set(KEY_LAST_CHECK, Date.now());
+                        const signedArr = storage.get(KEY_SIGNED_ARR) || [];
+                        if (!signedArr.includes(name)) {
+                            signedArr.push(name);
+                            storage.set(KEY_SIGNED_ARR, signedArr);
+                        }
+                        if (window.renderWBTopicList) window.renderWBTopicList();
+                        return { ok: true, name };
+                    }
                 }
 
                 if (attempt < retries) {
@@ -466,8 +677,8 @@
                     continue;
                 }
 
-                toast.error(`[${name}] 签到失败: ${displayMsg}`);
-                throw new Error(displayMsg);
+                toast.error(`[${name}] 签到未成功`);
+                throw new Error("签到未成功");
             } catch (err) {
                 if (attempt < retries) {
                     attempt++;
@@ -619,17 +830,27 @@
         }
 
         let allTopics = storage.get(KEY_TOPICS_ALL) || [];
+        let signedArr = (storage.get(KEY_SIGNED_ARR) || []).map(n => (n || "").trim());
 
         try {
-            if (allTopics.length === 0) {
-                setStatusText("正在获取关注列表...");
-                allTopics = await getInterestNameAId();
-                allTopics = allTopics.map(t => ({ id: t.id, name: (t.name || "").trim() }));
+            // 首次获取或强制刷新时，重新获取关注列表与实时签到状态
+            if (allTopics.length === 0 || force) {
+                setStatusText("正在获取超话列表并识别签到状态...");
+                const { topics, signedNames } = await fetchTopicsWithStatus();
+                allTopics = topics.map(t => ({ id: t.id, name: (t.name || "").trim(), scheme: t.scheme || "" }));
                 storage.set(KEY_TOPICS_ALL, allTopics);
+
+                // 核心：若从服务端识别出已签超话（在其他设备或手动已签），立刻同步并存入 signedArr
+                if (signedNames && signedNames.length > 0) {
+                    const signedSet = new Set([...signedArr, ...signedNames.map(n => (n || "").trim())]);
+                    signedArr = Array.from(signedSet);
+                    storage.set(KEY_SIGNED_ARR, signedArr);
+                }
             }
+
             renderList();
 
-            let signedArr = (storage.get(KEY_SIGNED_ARR) || []).map(n => (n || "").trim());
+            // 过滤真正待签到的超话
             let pendingTopics = allTopics.filter(t => !signedArr.includes((t.name || "").trim()));
 
             const isCheckedToday = storage.get(KEY_IS_CHECK) === true && !isNewDay(lastCheck);
@@ -643,8 +864,10 @@
                 return;
             }
 
+            // 如果此时待签项为空（即所有关注超话已经在其他设备或手动签到完毕）
             if (pendingTopics.length === 0) {
-                toast.info("所有超话今日均已签到完成！");
+                const autoDetectCount = signedArr.length;
+                toast.success(`所有超话今日均已签到完成！(已识别 ${autoDetectCount} 个已签超话，无需重复签到)`);
                 setStatusText("所有超话已签到完成");
                 storage.set(KEY_IS_CHECK, true);
                 storage.set(KEY_LAST_CHECK, Date.now());
@@ -652,7 +875,7 @@
                 return;
             }
 
-            toast.info(`发现 ${pendingTopics.length} 个待签超话（总关注 ${allTopics.length} 个），正在为您签到...`);
+            toast.info(`关注共 ${allTopics.length} 个超话，已识别 ${signedArr.length} 个已签，剩余 ${pendingTopics.length} 个待签，正在为您签到...`);
 
             const queue = new PromiseQueue({ concurrency: 1, minTimeout: 1000, maxTimeout: 1800 });
             let doneCount = 0;
@@ -679,6 +902,7 @@
             }
             renderList();
         } catch (err) {
+            console.error("[微博超话自动签到] 运行出错:", err);
             setStatusText("获取超话列表失败");
             toast.error("获取关注超话列表失败，请确认是否登录微博");
         }
