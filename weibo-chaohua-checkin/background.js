@@ -163,7 +163,9 @@
           const resp = await fetch(`https://m.weibo.cn${s}`, { credentials: 'include', signal: ctrl.signal });
           clearTimeout(t);
           const data = await resp.json();
-          if (data && data.ok === 1) return { ok: true };
+          if (data && (data.ok === 1 || data.msg?.includes('已签') || data.errno === 382004)) {
+            return { ok: true, alreadySigned: data.ok !== 1 };
+          }
           if (![429, 500, 502, 503, 504].includes(resp.status) || attempt >= 3) return { ok: false, data };
         } catch (e) {
           if (attempt >= 3) return { ok: false, error: String(e) };
@@ -266,23 +268,33 @@
           continue;
         }
 
+        let isSigned = false;
         let canCheckin = false;
         let checkinScheme = '';
+
         for (const btn of item.buttons) {
-          const name = btn?.name || '';
-          if (name === '签到') {
+          const name = (btn?.name || '').trim();
+          if (name === '签到' || (name.includes('签到') && !name.includes('已'))) {
             canCheckin = true;
             checkinScheme = btn?.scheme || '';
             break;
-          } else if (['已签', '已签到', '明日再来'].includes(name)) {
-            checkedInBefore += 1;
-            if (!signedTopics.includes(topicName)) {
-              signedTopics.push(topicName);
-            }
+          } else if (['已签', '已签到', '今日已签', '明日再来'].includes(name) || name.includes('已签')) {
+            isSigned = true;
             break;
           }
         }
-        if (canCheckin && checkinScheme) {
+
+        const desc1 = item.desc1 || '';
+        if (!isSigned && (desc1.includes('已签') || desc1.includes('明日再来'))) {
+          isSigned = true;
+        }
+
+        if (isSigned) {
+          checkedInBefore += 1;
+          if (!signedTopics.includes(topicName)) {
+            signedTopics.push(topicName);
+          }
+        } else if (canCheckin && checkinScheme) {
           tasks.push({ topicName, checkinScheme });
         }
       }

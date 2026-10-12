@@ -295,7 +295,7 @@
       const resp = await fetchWithRetry(fullUrl, { credentials: 'include', headers });
       if (!resp.ok) return false;
       const result = await resp.json();
-      return result?.ok === 1;
+      return result?.ok === 1 || result?.msg?.includes('已签') || result?.errno === 382004;
     } catch (e) {
       return false;
     }
@@ -334,7 +334,7 @@
         if (!running) break;
         if (!item?.title_sub || !item?.buttons) continue;
         totalTopics += 1;
-        const topicName = item.title_sub;
+        const topicName = (item.title_sub || '').trim();
         const desc1 = item.desc1 || '';
 
         // 检查断点：如果今日已经记录签到
@@ -351,19 +351,26 @@
         let buttonStatus = '未知';
 
         for (const btn of item.buttons) {
-          const name = btn?.name || '';
+          const name = (btn?.name || '').trim();
           if (name === '签到' || (name.includes('签到') && !name.includes('已'))) {
             canCheckin = true;
             checkinScheme = btn?.scheme || '';
             buttonStatus = '可签到';
             break;
           } else if (['已签', '已签到', '今日已签', '明日再来'].includes(name) || name.includes('已签')) {
-            checkedInBefore += 1;
             buttonStatus = '已签到';
-            if (!signedTopics.includes(topicName)) signedTopics.push(topicName);
-            log(`✓ ${topicName} - 今日已签到`);
             break;
           }
+        }
+
+        if (buttonStatus === '未知' && (desc1.includes('已签') || desc1.includes('明日再来'))) {
+          buttonStatus = '已签到';
+        }
+
+        if (buttonStatus === '已签到') {
+          checkedInBefore += 1;
+          if (!signedTopics.includes(topicName)) signedTopics.push(topicName);
+          log(`✓ ${topicName} - 今日已签到`);
         }
 
         let actionResult = '';
@@ -427,6 +434,7 @@
     if (!data) { log('获取超话列表失败'); finishAnalyze(); return; }
 
     let total = 0, checked = 0, can = 0;
+    const analyzedSignedTopics = [];
     const cards = data?.data?.cards || [];
     for (const card of cards) {
       if (!analyzing) break;
@@ -435,19 +443,40 @@
         if (!analyzing) break;
         if (!item?.title_sub || !item?.buttons) continue;
         total += 1;
-        const topicName = item.title_sub;
+        const topicName = (item.title_sub || '').trim();
         const desc1 = item.desc1 || '';
         let buttonStatus = '未知';
         for (const btn of item.buttons) {
-          const name = btn?.name || '';
-          if (name === '签到') { buttonStatus = '可签到'; can += 1; break; }
-          else if (name === '已签到' || name.includes('已签')) { buttonStatus = '已签到'; checked += 1; break; }
-          else if (name === '明日再来') { buttonStatus = '今日已签到'; checked += 1; break; }
+          const name = (btn?.name || '').trim();
+          if (name === '签到' || (name.includes('签到') && !name.includes('已'))) {
+            buttonStatus = '可签到';
+            can += 1;
+            break;
+          } else if (['已签', '已签到', '今日已签', '明日再来'].includes(name) || name.includes('已签')) {
+            buttonStatus = '已签到';
+            checked += 1;
+            analyzedSignedTopics.push(topicName);
+            break;
+          }
+        }
+        if (buttonStatus === '未知' && (desc1.includes('已签') || desc1.includes('明日再来'))) {
+          buttonStatus = '已签到';
+          checked += 1;
+          analyzedSignedTopics.push(topicName);
         }
         addRow(topicName, buttonStatus, desc1, '分析完成');
       }
     }
     totalTopics = total; checkedInBefore = checked; newlyCheckedIn = 0; failedCheckin = 0; updateStats();
+
+    // 将分析出的已签超话同步到存储
+    const todayStr = fmtDate(new Date());
+    const savedData = await storageGet(['lastRunDate', 'signedTopics']);
+    let signedTopics = savedData.signedTopics || [];
+    if (savedData.lastRunDate !== todayStr) signedTopics = [];
+    const mergedSigned = Array.from(new Set([...signedTopics, ...analyzedSignedTopics]));
+    await storageSet({ signedTopics: mergedSigned, lastRunDate: todayStr });
+
     const completionRate = (checked / Math.max(total, 1)) * 100;
     log('=== 超话签到状态分析 ===');
     log(`总共关注超话：${total}个`);
